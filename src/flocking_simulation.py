@@ -46,7 +46,7 @@ class FlockingDogParkSimulation:
         self.agents = []
     
     def load_image(self):
-        """Load and process the blueprint image to create traversable and obstacle masks based on red boundary."""
+        """Load and process the blueprint image to create traversable and obstacle masks based on red boundary and white obstacles."""
         # Read the image
         self.original_image = cv2.imread(self.image_path)
         if self.original_image is None:
@@ -97,15 +97,43 @@ class FlockingDogParkSimulation:
         
         # Store the red boundary mask for entry point detection
         self.red_boundary_mask = red_mask > 0
-        
-        # Obstacle mask is the inverse of traversable_mask
-        self.obstacle_mask = ~self.traversable_mask
-        
-        # Store dimensions
         self.height, self.width = self.traversable_mask.shape
-        
+
+        # Detect white obstacles (tables and chairs)
+        # White: high R, G, B values, but not red boundary
+        lower_white = np.array([220, 220, 220])
+        upper_white = np.array([255, 255, 255])
+        white_mask = cv2.inRange(self.original_rgb, lower_white, upper_white)
+        # Only consider white inside the traversable area
+        white_obstacle_mask = (white_mask > 0) & self.traversable_mask
+        self.white_obstacle_mask = white_obstacle_mask
+
+        # Update obstacle mask to include white obstacles
+        self.obstacle_mask = ~self.traversable_mask | self.white_obstacle_mask
+
+        # Find contours in the white obstacle mask
+        white_obstacle_mask_uint8 = white_obstacle_mask.astype(np.uint8) * 255
+        contours, _ = cv2.findContours(white_obstacle_mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Minimum area threshold (tune as needed)
+        min_area = 500
+
+        # Create a new mask for filtered obstacles (must be uint8 for OpenCV)
+        filtered_white_obstacle_mask = np.zeros_like(white_obstacle_mask, dtype=np.uint8)
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area >= min_area:
+                cv2.drawContours(filtered_white_obstacle_mask, [cnt], -1, 1, -1)  # Fill the contour
+
+        # Convert back to boolean mask
+        self.white_obstacle_mask = filtered_white_obstacle_mask.astype(bool)
+        # Update obstacle mask to use the filtered white obstacles
+        self.obstacle_mask = ~self.traversable_mask | self.white_obstacle_mask
+
         print(f"Image processed: {self.width}x{self.height}")
         print(f"Traversable area: {np.sum(self.traversable_mask)} pixels")
+        print(f"White obstacles detected: {np.sum(self.white_obstacle_mask)} pixels")
     
     def set_entry_point(self):
         """Set the entry point using explicitly defined coordinates on the red boundary."""
@@ -299,8 +327,8 @@ class FlockingDogParkSimulation:
         # Initialize force components
         force_x, force_y = 0, 0
         
-        # Check surrounding area for non-traversable cells
-        boundary_radius = 15  # Detection distance from boundaries
+        # Check surrounding area for non-traversable cells (including white obstacles)
+        boundary_radius = 15  # Detection distance from boundaries/obstacles
         for dy in range(-boundary_radius, boundary_radius + 1):
             for dx in range(-boundary_radius, boundary_radius + 1):
                 # Skip points outside our detection radius
@@ -309,9 +337,9 @@ class FlockingDogParkSimulation:
                     continue
                 
                 ny, nx = y + dy, x + dx
-                # Check if point is within bounds and is an obstacle
+                # Check if point is within bounds and is an obstacle (boundary or white object)
                 if (0 <= ny < self.height and 0 <= nx < self.width and 
-                    not self.traversable_mask[ny, nx]):
+                    self.obstacle_mask[ny, nx]):
                     # Apply repulsive force inversely proportional to distance
                     # Force points away from obstacle
                     repulsion = (boundary_radius - dist) / boundary_radius
@@ -344,7 +372,7 @@ class FlockingDogParkSimulation:
         return np.where(mask)[0].tolist()
     
     def is_valid_position(self, x, y):
-        """Check if a position is valid (within bounds and traversable)."""
+        """Check if a position is valid (within bounds and traversable, not in obstacle)."""
         # Convert to integer coordinates for mask lookup
         ix, iy = int(x), int(y)
         
@@ -352,8 +380,8 @@ class FlockingDogParkSimulation:
         if not (0 <= ix < self.width and 0 <= iy < self.height):
             return False
         
-        # Check if traversable
-        return self.traversable_mask[iy, ix]
+        # Check if traversable and not an obstacle
+        return self.traversable_mask[iy, ix] and not self.obstacle_mask[iy, ix]
     
     def limit_speed(self, vx, vy):
         """Limit speed to be between min_speed and max_speed using vectorized operations."""
@@ -442,6 +470,31 @@ class FlockingDogParkSimulation:
         velocities = np.array([agent[2:4] for agent in self.agents])
         return velocities
 
+    def visualize_and_approve_obstacles(self):
+        """Show the detected obstacles (white) over the blueprint and ask for user approval."""
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+        # Create an overlay image
+        overlay = self.original_rgb.copy()
+        # Mark white obstacles in magenta
+        overlay[self.white_obstacle_mask] = [255, 0, 255]
+        plt.figure(figsize=(14, 10))
+        ax = plt.gca()
+        ax.imshow(overlay, origin='upper')
+        ax.set_aspect('equal')
+        ax.set_xlim(0, self.width)
+        ax.set_ylim(self.height, 0)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        plt.title('Detected Obstacles (magenta) over Blueprint')
+        plt.tight_layout()
+        plt.show()
+        # Ask for approval
+        resp = input("Do you approve the detected obstacles? (y/n): ")
+        if resp.strip().lower() != 'y':
+            print("Obstacle detection not approved. Please adjust detection logic or blueprint.")
+            sys.exit(1)
+
 
 def visualize_flocking_simulation(image_path, steps=1000, arrival_rate=0.1, 
                                   cohesion_factor=0.5, separation_factor=0.5, 
@@ -456,6 +509,9 @@ def visualize_flocking_simulation(image_path, steps=1000, arrival_rate=0.1,
         alignment_factor=alignment_factor,
         visual_range=perception_radius
     )
+    
+    # Ask user to approve detected obstacles before proceeding
+    sim.visualize_and_approve_obstacles()
     
     # Set arrival rate and max force
     sim.arrival_rate = arrival_rate
@@ -509,7 +565,13 @@ def visualize_flocking_simulation(image_path, steps=1000, arrival_rate=0.1,
     mask_img[sim.red_boundary_mask, 1] = 0.1   # G
     mask_img[sim.red_boundary_mask, 2] = 0.1   # B
     mask_img[sim.red_boundary_mask, 3] = 0.5   # Alpha
-    
+
+    # Magenta for obstacles (including white obstacles and boundaries)
+    mask_img[sim.obstacle_mask, 0] = 1.0   # R
+    mask_img[sim.obstacle_mask, 1] = 0.0   # G
+    mask_img[sim.obstacle_mask, 2] = 1.0   # B
+    mask_img[sim.obstacle_mask, 3] = 0.5   # Alpha
+
     # Show the original blueprint with overlay
     ax.imshow(sim.original_rgb)
     ax.imshow(mask_img)
@@ -716,6 +778,9 @@ def generate_flocking_heatmap(image_path, steps=1000, arrival_rate=0.1,
         alignment_factor=alignment_factor,
         visual_range=perception_radius
     )
+    
+    # Ask user to approve detected obstacles before proceeding
+    sim.visualize_and_approve_obstacles()
     
     # Set the arrival rate for the simulation
     sim.arrival_rate = arrival_rate
