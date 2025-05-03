@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dog Park Simulation</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .control-group {
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-radius: 6px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .slider-container {
+            display: flex;
+            align-items: center;
+        }
+        input[type="range"] {
+            flex-grow: 1;
+            margin-right: 10px;
+        }
+        .value-display {
+            min-width: 40px;
+            text-align: right;
+            font-weight: 600;
+        }
+        button {
+            display: block;
+            width: 100%;
+            max-width: 300px;
+            margin: 0 auto;
+            padding: 12px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        .simulation-container {
+            margin-top: 30px;
+            text-align: center;
+        }
+        .simulation-image {
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+        }
+        .loading {
+            display: none;
+            margin: 20px auto;
+            text-align: center;
+            font-style: italic;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Dog Park Movement Simulation</h1>
+        
+        <div class="controls">
+            <div class="control-group">
+                <label for="park-width">Park Width:</label>
+                <div class="slider-container">
+                    <input type="range" id="park-width" min="20" max="200" value="100" step="10">
+                    <span class="value-display" id="park-width-value">100</span>
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <label for="park-height">Park Height:</label>
+                <div class="slider-container">
+                    <input type="range" id="park-height" min="20" max="200" value="100" step="10">
+                    <span class="value-display" id="park-height-value">100</span>
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <label for="obstacle-size">Obstacle Size:</label>
+                <div class="slider-container">
+                    <input type="range" id="obstacle-size" min="5" max="50" value="20" step="5">
+                    <span class="value-display" id="obstacle-size-value">20</span>
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <label for="arrival-rate">Arrival Rate:</label>
+                <div class="slider-container">
+                    <input type="range" id="arrival-rate" min="0.01" max="0.5" value="0.1" step="0.01">
+                    <span class="value-display" id="arrival-rate-value">0.1</span>
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <label for="temperature">Temperature:</label>
+                <div class="slider-container">
+                    <input type="range" id="temperature" min="0.1" max="5" value="1.0" step="0.1">
+                    <span class="value-display" id="temperature-value">1.0</span>
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <label for="steps">Simulation Steps:</label>
+                <div class="slider-container">
+                    <input type="range" id="steps" min="50" max="500" value="200" step="50">
+                    <span class="value-display" id="steps-value">200</span>
+                </div>
+            </div>
+        </div>
+        
+        <button id="run-simulation">Run Simulation</button>
+        
+        <div id="loading" class="loading">Running simulation, please wait...</div>
+        
+        <div class="simulation-container">
+            <img id="simulation-image" class="simulation-image" src="" alt="Simulation result will appear here" style="display: none;">
+        </div>
+    </div>
+
+    <script>
+        // Update the displayed values when sliders change
+        document.querySelectorAll('input[type="range"]').forEach(slider => {
+            const valueDisplay = document.getElementById(`${slider.id}-value`);
+            slider.addEventListener('input', () => {
+                valueDisplay.textContent = slider.value;
+            });
+        });
+        
+        // Run simulation when button is clicked
+        document.getElementById('run-simulation').addEventListener('click', async () => {
+            const width = parseInt(document.getElementById('park-width').value);
+            const height = parseInt(document.getElementById('park-height').value);
+            const obstacleSize = parseInt(document.getElementById('obstacle-size').value);
+            const arrivalRate = parseFloat(document.getElementById('arrival-rate').value);
+            const temperature = parseFloat(document.getElementById('temperature').value);
+            const steps = parseInt(document.getElementById('steps').value);
+            
+            const loadingIndicator = document.getElementById('loading');
+            const simulationImage = document.getElementById('simulation-image');
+            
+            // Show loading indicator
+            loadingIndicator.style.display = 'block';
+            simulationImage.style.display = 'none';
+            
+            try {
+                const response = await fetch('/simulate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        width,
+                        height,
+                        obstacle_size: obstacleSize,
+                        arrival_rate: arrivalRate,
+                        temperature,
+                        steps
+                    })
+                });
+                
+                const data = await response.json();
+                
+                // Display the simulation image
+                simulationImage.src = data.image;
+                simulationImage.style.display = 'block';
+            } catch (error) {
+                console.error('Error running simulation:', error);
+                alert('There was an error running the simulation. Please try again.');
+            } finally {
+                // Hide loading indicator
+                loadingIndicator.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html> 

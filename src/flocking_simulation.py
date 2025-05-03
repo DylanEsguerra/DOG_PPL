@@ -1,0 +1,844 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.animation import FuncAnimation
+import random
+import argparse
+import cv2
+import os
+import sys
+import matplotlib.transforms
+import matplotlib.markers
+from matplotlib.widgets import Slider
+
+class FlockingDogParkSimulation:
+    def __init__(self, image_path, cohesion_factor=0.5, 
+                 separation_factor=0.5, alignment_factor=0.5, visual_range=20):
+        """Initialize the flocking dog park simulation with traditional BOIDS parameters.
+        
+        Args:
+            image_path (str): Path to the blueprint image
+            cohesion_factor (float): How much agents are attracted to each other (0-1)
+            separation_factor (float): How much agents avoid each other (0-1)
+            alignment_factor (float): How much agents align their velocity with others (0-1)
+            visual_range (int): How far agents can perceive other agents
+        """
+        self.image_path = image_path
+        self.cohesion_factor = cohesion_factor
+        self.separation_factor = separation_factor
+        self.alignment_factor = alignment_factor
+        self.visual_range = visual_range
+        
+        # Fixed parameters
+        self.max_speed = 2.0
+        self.min_speed = 0.5
+        self.max_force = 0.1
+        self.arrival_rate = 0.05  # Fixed arrival rate
+        
+        # Load and process the blueprint image
+        self.load_image()
+        
+        # Set entry point (source) similar to diffusion simulation
+        self.set_entry_point()
+        
+        # Initialize list of agents 
+        # Each agent is [x, y, vx, vy]
+        self.agents = []
+    
+    def load_image(self):
+        """Load and process the blueprint image to create traversable and obstacle masks based on red boundary."""
+        # Read the image
+        self.original_image = cv2.imread(self.image_path)
+        if self.original_image is None:
+            raise ValueError(f"Could not load image at {self.image_path}")
+        
+        # Convert to RGB (from BGR)
+        self.original_rgb = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGB)
+        
+        # Extract red boundaries
+        # Define the red color range (adjusting to better detect the red boundary)
+        lower_red1 = np.array([150, 0, 0])    # First range of red
+        upper_red1 = np.array([255, 100, 100])
+        
+        # Create mask for red boundaries
+        red_mask = cv2.inRange(self.original_rgb, lower_red1, upper_red1)
+        
+        # Dilate to make sure the boundary is continuous
+        kernel = np.ones((3, 3), np.uint8)
+        red_mask = cv2.dilate(red_mask, kernel, iterations=1)
+        
+        # Create a temporary image to work with
+        h, w = red_mask.shape
+        temp_image = np.zeros((h, w), dtype=np.uint8)
+        temp_image[red_mask > 0] = 255
+        
+        # Create a copy of the image for contour finding
+        contour_image = temp_image.copy()
+        
+        # Find contours
+        contours, _ = cv2.findContours(contour_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Create mask for the area inside the red boundary
+        traversable_mask = np.zeros_like(temp_image, dtype=bool)
+        
+        if contours:
+            # Find the largest contour (should be the red boundary)
+            largest_contour = max(contours, key=cv2.contourArea)
+            
+            # Create a mask of the inside of the contour
+            mask = np.zeros_like(temp_image)
+            cv2.drawContours(mask, [largest_contour], 0, 255, -1)  # -1 means fill
+            
+            # Set the traversable area to be inside the contour, excluding the boundary itself
+            traversable_mask = (mask > 0) & (red_mask == 0)
+        
+        # Set the traversable mask
+        self.traversable_mask = traversable_mask
+        
+        # Store the red boundary mask for entry point detection
+        self.red_boundary_mask = red_mask > 0
+        
+        # Obstacle mask is the inverse of traversable_mask
+        self.obstacle_mask = ~self.traversable_mask
+        
+        # Store dimensions
+        self.height, self.width = self.traversable_mask.shape
+        
+        print(f"Image processed: {self.width}x{self.height}")
+        print(f"Traversable area: {np.sum(self.traversable_mask)} pixels")
+    
+    def set_entry_point(self):
+        """Set the entry point using explicitly defined coordinates on the red boundary."""
+        # User-specified coordinates from plot digitizer
+        # Need to find the closest points on the red boundary to these coordinates
+        user_points = [
+            (384.98, 62.11),  # (y, x) format as used in our implementation
+            (327.06, 63.16)   # (y, x) format
+        ]
+        
+        # Find all points on the red boundary
+        boundary_points = []
+        for y in range(self.height):
+            for x in range(self.width):
+                if self.red_boundary_mask[y, x]:
+                    boundary_points.append((y, x))
+        
+        # Find the closest boundary points to the user-specified points
+        closest_boundary_points = []
+        for user_y, user_x in user_points:
+            closest_dist = float('inf')
+            closest_point = None
+            
+            for bound_y, bound_x in boundary_points:
+                # Calculate Euclidean distance
+                dist = (bound_y - user_y)**2 + (bound_x - user_x)**2
+                if dist < closest_dist:
+                    closest_dist = dist
+                    closest_point = (bound_y, bound_x)
+            
+            if closest_point:
+                closest_boundary_points.append(closest_point)
+            else:
+                # Fallback if no boundary point is found (shouldn't happen)
+                closest_boundary_points.append((int(user_y), int(user_x)))
+        
+        # If we found two boundary points, use them to define the entry area
+        if len(closest_boundary_points) == 2:
+            # Calculate the midpoint between the two boundary points
+            y1, x1 = closest_boundary_points[0]
+            y2, x2 = closest_boundary_points[1]
+            
+            # Set the entry point as the midpoint
+            mid_y = (y1 + y2) // 2
+            mid_x = (x1 + x2) // 2
+            
+            # Find a traversable point near this midpoint
+            found_traversable = False
+            search_radius = 10
+            
+            while not found_traversable and search_radius < 30:
+                for dy in range(-search_radius, search_radius + 1):
+                    for dx in range(-search_radius, search_radius + 1):
+                        ny, nx = mid_y + dy, mid_x + dx
+                        if (0 <= ny < self.height and 0 <= nx < self.width and 
+                            self.traversable_mask[ny, nx]):
+                            # Found a traversable point
+                            self.entry_point = (ny, nx)
+                            found_traversable = True
+                            break
+                    if found_traversable:
+                        break
+                
+                # Increase search radius if no traversable point was found
+                search_radius += 5
+            
+            # If still no traversable point was found, use the midpoint anyway
+            if not found_traversable:
+                self.entry_point = (mid_y, mid_x)
+                
+            # Store the boundary points for visualization and entry point setting
+            self.boundary_source_points = closest_boundary_points
+        else:
+            # Fallback if we don't have exactly two points
+            # Just use the first boundary point we found or a default
+            if boundary_points:
+                self.entry_point = boundary_points[0]
+                self.boundary_source_points = [boundary_points[0]]
+            else:
+                # Safe fallback - middle of left edge
+                self.entry_point = (self.height // 2, 10)
+                self.boundary_source_points = [self.entry_point]
+        
+        print(f"Entry point set at: {self.entry_point}")
+        print(f"Boundary source points: {self.boundary_source_points}")
+        
+        # Store entry point coordinates for easier access
+        self.entry_y, self.entry_x = self.entry_point
+    
+    def add_agent(self):
+        """Add a new agent at the entry point with random initial velocity."""
+        # Random velocity direction
+        angle = random.uniform(0, 2 * np.pi)
+        speed = random.uniform(self.min_speed, self.max_speed)
+        vx = np.cos(angle) * speed
+        vy = np.sin(angle) * speed
+        
+        # Add agent [x, y, vx, vy]
+        self.agents.append([self.entry_x, self.entry_y, vx, vy])
+    
+    def apply_separation(self, agent_index, nearby_agents):
+        """Calculate separation force to avoid other agents using vectorized operations."""
+        if not nearby_agents:
+            return 0, 0
+        
+        agent = self.agents[agent_index]
+        agent_pos = np.array([agent[0], agent[1]])
+        
+        # Get positions of nearby agents
+        nearby_positions = np.array([[self.agents[i][0], self.agents[i][1]] for i in nearby_agents])
+        
+        # Calculate direction vectors (from other agents to this agent)
+        diff_vectors = agent_pos - nearby_positions
+        
+        # Calculate distances (with small epsilon to avoid division by zero)
+        distances = np.sqrt(np.sum(diff_vectors**2, axis=1)) + 1e-8
+        
+        # Normalize direction vectors
+        normalized_vectors = diff_vectors / distances[:, np.newaxis]
+        
+        # Weight by inverse square of distance
+        weights = 1.0 / (distances**2)[:, np.newaxis]
+        
+        # Apply weights to normalized vectors
+        weighted_vectors = normalized_vectors * weights
+        
+        # Sum all weighted vectors
+        force = np.sum(weighted_vectors, axis=0)
+        
+        # Normalize and scale the resulting force
+        force_magnitude = np.linalg.norm(force)
+        if force_magnitude > 0:
+            force = (force / force_magnitude) * self.max_force * self.separation_factor
+        
+        return force[0], force[1]
+    
+    def apply_cohesion(self, agent_index, nearby_agents):
+        """Calculate cohesion force to move toward other agents using vectorized operations."""
+        if not nearby_agents:
+            return 0, 0
+        
+        agent = self.agents[agent_index]
+        agent_pos = np.array([agent[0], agent[1]])
+        
+        # Get positions of nearby agents
+        nearby_positions = np.array([[self.agents[i][0], self.agents[i][1]] for i in nearby_agents])
+        
+        # Calculate center of mass
+        com = np.mean(nearby_positions, axis=0)
+        
+        # Vector from current position to center of mass
+        to_com = com - agent_pos
+        
+        # Distance to center of mass
+        distance = np.linalg.norm(to_com) + 1e-8
+        
+        # Normalize and scale
+        force = (to_com / distance) * self.max_force * self.cohesion_factor
+        
+        return force[0], force[1]
+    
+    def apply_alignment(self, agent_index, nearby_agents):
+        """Calculate alignment force to match velocity with nearby agents using vectorized operations."""
+        if not nearby_agents:
+            return 0, 0
+        
+        agent = self.agents[agent_index]
+        agent_velocity = np.array([agent[2], agent[3]])
+        
+        # Get velocities of nearby agents
+        nearby_velocities = np.array([[self.agents[i][2], self.agents[i][3]] for i in nearby_agents])
+        
+        # Calculate average velocity
+        avg_velocity = np.mean(nearby_velocities, axis=0)
+        
+        # Calculate alignment force (difference between average velocity and agent's velocity)
+        force = (avg_velocity - agent_velocity) * self.alignment_factor
+        
+        # Limit the force magnitude
+        force_magnitude = np.linalg.norm(force)
+        if force_magnitude > self.max_force:
+            force = (force / force_magnitude) * self.max_force
+        
+        return force[0], force[1]
+    
+    def apply_boundary_avoidance(self, agent_index):
+        """Force to avoid the non-traversable areas (boundaries and obstacles) using more efficient computation."""
+        agent = self.agents[agent_index]
+        x, y = int(agent[0]), int(agent[1])
+        
+        # Initialize force components
+        force_x, force_y = 0, 0
+        
+        # Check surrounding area for non-traversable cells
+        boundary_radius = 15  # Detection distance from boundaries
+        for dy in range(-boundary_radius, boundary_radius + 1):
+            for dx in range(-boundary_radius, boundary_radius + 1):
+                # Skip points outside our detection radius
+                dist = np.sqrt(dx**2 + dy**2)
+                if dist > boundary_radius or dist == 0:
+                    continue
+                
+                ny, nx = y + dy, x + dx
+                # Check if point is within bounds and is an obstacle
+                if (0 <= ny < self.height and 0 <= nx < self.width and 
+                    not self.traversable_mask[ny, nx]):
+                    # Apply repulsive force inversely proportional to distance
+                    # Force points away from obstacle
+                    repulsion = (boundary_radius - dist) / boundary_radius
+                    force_x -= dx / dist * repulsion
+                    force_y -= dy / dist * repulsion
+        
+        # Normalize and scale forces
+        force_magnitude = np.sqrt(force_x**2 + force_y**2)
+        if force_magnitude > 0:
+            force_x = (force_x / force_magnitude) * self.max_force * 1.5  # Stronger than other forces
+            force_y = (force_y / force_magnitude) * self.max_force * 1.5
+        
+        return force_x, force_y
+    
+    def find_nearby_agents(self, agent_index):
+        """Find indexes of agents within visual range using vectorized operations."""
+        agent = self.agents[agent_index]
+        agent_pos = np.array([agent[0], agent[1]])
+        
+        # Convert all agent positions to numpy array
+        all_positions = np.array([[a[0], a[1]] for a in self.agents])
+        
+        # Calculate distances using broadcasting
+        distances = np.sqrt(np.sum((all_positions - agent_pos)**2, axis=1))
+        
+        # Create mask for agents within range (excluding self)
+        mask = (distances <= self.visual_range) & (np.arange(len(self.agents)) != agent_index)
+        
+        # Return indices of nearby agents
+        return np.where(mask)[0].tolist()
+    
+    def is_valid_position(self, x, y):
+        """Check if a position is valid (within bounds and traversable)."""
+        # Convert to integer coordinates for mask lookup
+        ix, iy = int(x), int(y)
+        
+        # Check if within bounds
+        if not (0 <= ix < self.width and 0 <= iy < self.height):
+            return False
+        
+        # Check if traversable
+        return self.traversable_mask[iy, ix]
+    
+    def limit_speed(self, vx, vy):
+        """Limit speed to be between min_speed and max_speed using vectorized operations."""
+        speed = np.sqrt(vx**2 + vy**2)
+        
+        if speed > self.max_speed:
+            # Scale down to max_speed
+            return (vx / speed) * self.max_speed, (vy / speed) * self.max_speed
+        elif speed < self.min_speed and speed > 0:
+            # Scale up to min_speed
+            return (vx / speed) * self.min_speed, (vy / speed) * self.min_speed
+        else:
+            return vx, vy
+    
+    def move_agents(self):
+        """Move all agents using flocking behavior with optimized operations."""
+        # Convert agents to numpy array for vectorized operations
+        if not self.agents:
+            return
+            
+        # Process each agent
+        for i in range(len(self.agents)):
+            # Find nearby agents
+            nearby_agents = self.find_nearby_agents(i)
+            
+            # Calculate forces
+            separation_x, separation_y = self.apply_separation(i, nearby_agents)
+            cohesion_x, cohesion_y = self.apply_cohesion(i, nearby_agents)
+            alignment_x, alignment_y = self.apply_alignment(i, nearby_agents)
+            boundary_x, boundary_y = self.apply_boundary_avoidance(i)
+            
+            # Apply all forces to velocity
+            self.agents[i][2] += separation_x + cohesion_x + alignment_x + boundary_x
+            self.agents[i][3] += separation_y + cohesion_y + alignment_y + boundary_y
+            
+            # Limit speed
+            self.agents[i][2], self.agents[i][3] = self.limit_speed(self.agents[i][2], self.agents[i][3])
+            
+            # Calculate new position
+            new_x = self.agents[i][0] + self.agents[i][2]
+            new_y = self.agents[i][1] + self.agents[i][3]
+            
+            # Check if new position is valid
+            if self.is_valid_position(new_x, new_y):
+                self.agents[i][0] = new_x
+                self.agents[i][1] = new_y
+            else:
+                # If not valid, try to find a valid position nearby or bounce
+                valid_move_found = False
+                for attempt in range(8):  # Try 8 directions
+                    angle = 2 * np.pi * attempt / 8
+                    test_x = self.agents[i][0] + np.cos(angle) * 2
+                    test_y = self.agents[i][1] + np.sin(angle) * 2
+                    
+                    if self.is_valid_position(test_x, test_y):
+                        # Found a valid position, move there and adjust velocity
+                        self.agents[i][0] = test_x
+                        self.agents[i][1] = test_y
+                        # Redirect velocity in this direction
+                        speed = np.sqrt(self.agents[i][2]**2 + self.agents[i][3]**2)
+                        self.agents[i][2] = np.cos(angle) * speed
+                        self.agents[i][3] = np.sin(angle) * speed
+                        valid_move_found = True
+                        break
+                
+                if not valid_move_found:
+                    # Couldn't find valid position nearby, just reverse direction
+                    self.agents[i][2] *= -1
+                    self.agents[i][3] *= -1
+    
+    def step(self):
+        """Perform one step of the simulation."""
+        # Add new agents with probability based on arrival rate
+        if random.random() < self.arrival_rate and len(self.agents) < 200:  # Limit total agents
+            self.add_agent()
+        
+        # Move existing agents
+        self.move_agents()
+    
+    def get_agent_positions(self):
+        """Return the positions of all agents."""
+        return np.array([[agent[0], agent[1]] for agent in self.agents])
+    
+    def get_agent_velocities(self):
+        """Return numpy array of agent velocities"""
+        velocities = np.array([agent[2:4] for agent in self.agents])
+        return velocities
+
+
+def visualize_flocking_simulation(image_path, steps=1000, arrival_rate=0.1, 
+                                  cohesion_factor=0.5, separation_factor=0.5, 
+                                  alignment_factor=0.5, perception_radius=20,
+                                  max_force=0.1):
+    """Visualize the flocking simulation using the blueprint layout with triangles showing movement direction."""
+    # Create simulation with blueprint layout
+    sim = FlockingDogParkSimulation(
+        image_path=image_path,
+        cohesion_factor=cohesion_factor,
+        separation_factor=separation_factor,
+        alignment_factor=alignment_factor,
+        visual_range=perception_radius
+    )
+    
+    # Set arrival rate and max force
+    sim.arrival_rate = arrival_rate
+    sim.max_force = max_force
+    
+    # Add initial agents to ensure we have some at the start
+    for _ in range(5):
+        sim.add_agent()
+    
+    # Set up the plot with new style
+    plt.style.use('dark_background')
+    fig = plt.figure(figsize=(14, 10))
+    
+    # Create grid for main plot and sliders
+    gs = plt.GridSpec(21, 1)  # 21 rows, 1 column (added one more for arrival rate slider)
+    
+    # Main plot takes up most of the space
+    ax = fig.add_subplot(gs[0:16, 0])
+    
+    fig.patch.set_facecolor('#2A2A2A')
+    ax.set_facecolor('#2A2A2A')
+    
+    # Set axes properties
+    ax.set_xlim(0, sim.width)
+    ax.set_ylim(0, sim.height)
+    ax.set_aspect('equal')
+    
+    # Remove spines and ticks for minimalist look
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    
+    # Add title with custom styling
+    ax.set_title('Traditional BOIDS Flocking Simulation', 
+                 fontsize=18, fontweight='bold', color='white',
+                 fontfamily='monospace', pad=20)
+    
+    # Create a mask for visualization - green for traversable, with alpha for visibility
+    mask_img = np.zeros((sim.height, sim.width, 4))  # RGBA image
+    # Green for traversable areas
+    mask_img[sim.traversable_mask, 0] = 0.0    # R
+    mask_img[sim.traversable_mask, 1] = 0.5    # G
+    mask_img[sim.traversable_mask, 2] = 0.2    # B
+    mask_img[sim.traversable_mask, 3] = 0.3    # Alpha (semi-transparent)
+    
+    # Red for boundaries
+    mask_img[sim.red_boundary_mask, 0] = 0.8   # R
+    mask_img[sim.red_boundary_mask, 1] = 0.1   # G
+    mask_img[sim.red_boundary_mask, 2] = 0.1   # B
+    mask_img[sim.red_boundary_mask, 3] = 0.5   # Alpha
+    
+    # Show the original blueprint with overlay
+    ax.imshow(sim.original_rgb)
+    ax.imshow(mask_img)
+    
+    # Draw the entry points
+    # Draw a line connecting the two boundary points to show the source area
+    if hasattr(sim, 'boundary_source_points') and len(sim.boundary_source_points) >= 2:
+        p1, p2 = sim.boundary_source_points
+        y1, x1 = p1
+        y2, x2 = p2
+        
+        # Draw a thick yellow line along the boundary segment
+        ax.plot([x1, x2], [y1, y2], color='#FFFF00', linestyle='-', linewidth=3)
+        
+        # Highlight the entry point
+        ax.scatter([sim.entry_x], [sim.entry_y], color='#FFFF00', s=100, marker='*')
+    else:
+        # Fallback: mark the entry point with a yellow star
+        ax.scatter([sim.entry_x], [sim.entry_y], color='#FFFF00', s=100, marker='*')
+    
+    # Use a list to store artists that need to be cleaned up between frames
+    artists = []
+    
+    def init():
+        # Clear any existing artists
+        for artist in artists:
+            if artist in ax.get_children():
+                artist.remove()
+        artists.clear()
+        
+        # Reset the circle
+        range_circle.set_center((0, 0))
+        range_circle.set_visible(False)
+        
+        # Reset the text
+        status_text.set_text('')
+        
+        return [range_circle, status_text]
+    
+    def update(frame):
+        # Run multiple simulation steps per frame to speed up simulation
+        steps_per_frame = 3
+        for _ in range(steps_per_frame):
+            sim.step()
+        
+        # Get agent positions and velocities
+        positions = sim.get_agent_positions()
+        velocities = sim.get_agent_velocities()
+        
+        # Clear previous triangles
+        for artist in artists:
+            if artist in ax.get_children():
+                artist.remove()
+        artists.clear()
+        
+        if len(positions) > 0:
+            # Calculate angles
+            angles = np.arctan2(velocities[:, 1], velocities[:, 0])
+            angles_deg = np.degrees(angles)
+            
+            # Create triangles with appropriate rotations
+            for i, (x, y, angle) in enumerate(zip(positions[:, 0], positions[:, 1], angles_deg)):
+                # Create a triangle pointing in direction of movement
+                triangle = patches.RegularPolygon(
+                    (x, y), 3, radius=5, 
+                    orientation=np.radians(angle-90),  # -90 to make it point forward
+                    color='white', alpha=0.7
+                )
+                ax.add_patch(triangle)
+                artists.append(triangle)
+            
+            # Show visual range for first agent
+            if len(sim.agents) > 0:
+                range_circle.set_center((sim.agents[0][0], sim.agents[0][1]))
+                range_circle.set_visible(True)
+        else:
+            range_circle.set_visible(False)
+        
+        # Update status text
+        status_text.set_text(
+            f'STEP: {frame * steps_per_frame}\nAGENTS: {len(sim.agents)}\n'
+            f'COHESION: {sim.cohesion_factor:.1f}\n'
+            f'SEPARATION: {sim.separation_factor:.1f}\n'
+            f'ALIGNMENT: {sim.alignment_factor:.1f}\n'
+            f'VISUAL RANGE: {sim.visual_range}\n'
+            f'ARRIVAL: {sim.arrival_rate:.2f}'
+        )
+        
+        # Return all artists that need to be redrawn
+        return artists + [range_circle, status_text]
+    
+    # Visual range circle for reference
+    range_circle = patches.Circle(
+        (0, 0), radius=perception_radius, 
+        fill=False, linestyle='--', edgecolor='#FFFFFF', alpha=0.4,
+        visible=False
+    )
+    ax.add_patch(range_circle)
+    
+    # Status text with styling
+    status_text = ax.text(
+        0.02, 0.98, '', transform=ax.transAxes, 
+        verticalalignment='top', fontsize=12, fontfamily='monospace',
+        color='white', bbox=dict(facecolor='#2A2A2A', alpha=0.7, edgecolor='none')
+    )
+    
+    # Add sliders for parameters
+    # Cohesion slider
+    ax_cohesion = fig.add_subplot(gs[16, 0])
+    cohesion_slider = Slider(
+        ax=ax_cohesion,
+        label='Cohesion',
+        valmin=0.0,
+        valmax=1.0,
+        valinit=cohesion_factor,
+        color='#4287f5'
+    )
+    
+    # Separation slider
+    ax_separation = fig.add_subplot(gs[17, 0])
+    separation_slider = Slider(
+        ax=ax_separation,
+        label='Separation',
+        valmin=0.0,
+        valmax=1.0,
+        valinit=separation_factor,
+        color='#f54242'
+    )
+    
+    # Alignment slider
+    ax_alignment = fig.add_subplot(gs[18, 0])
+    alignment_slider = Slider(
+        ax=ax_alignment,
+        label='Alignment',
+        valmin=0.0,
+        valmax=1.0,
+        valinit=alignment_factor,
+        color='#42f5a7'
+    )
+    
+    # Perception radius slider
+    ax_perception = fig.add_subplot(gs[19, 0])
+    perception_slider = Slider(
+        ax=ax_perception,
+        label='Perception',
+        valmin=5,
+        valmax=50,
+        valinit=perception_radius,
+        valstep=1,
+        color='#f5d742'
+    )
+    
+    # Arrival rate slider
+    ax_arrival_rate = fig.add_subplot(gs[20, 0])
+    arrival_rate_slider = Slider(
+        ax=ax_arrival_rate,
+        label='Arrival Rate',
+        valmin=0.0,
+        valmax=1.0,
+        valinit=arrival_rate,
+        valstep=0.01,
+        color='#f542f5'
+    )
+    
+    # Update function for sliders
+    def update_params(val):
+        sim.cohesion_factor = cohesion_slider.val
+        sim.separation_factor = separation_slider.val
+        sim.alignment_factor = alignment_slider.val
+        sim.visual_range = perception_slider.val
+        sim.arrival_rate = arrival_rate_slider.val
+        # Update the range circle
+        range_circle.set_radius(perception_slider.val)
+    
+    # Connect sliders to update function
+    cohesion_slider.on_changed(update_params)
+    separation_slider.on_changed(update_params)
+    alignment_slider.on_changed(update_params)
+    perception_slider.on_changed(update_params)
+    arrival_rate_slider.on_changed(update_params)
+        
+    anim = FuncAnimation(
+        fig, update, frames=steps, init_func=init, 
+        blit=True, interval=20, repeat=False, cache_frame_data=False
+    )
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return sim
+
+
+def generate_flocking_heatmap(image_path, steps=1000, arrival_rate=0.1, 
+                             cohesion_factor=0.5, 
+                             separation_factor=0.5, alignment_factor=0.5,
+                             perception_radius=10, max_force=1.0):
+    """Generate a heatmap of dog density for the flocking simulation using blueprint layout."""
+    
+    # Create simulation with blueprint layout
+    sim = FlockingDogParkSimulation(
+        image_path=image_path,
+        cohesion_factor=cohesion_factor,
+        separation_factor=separation_factor,
+        alignment_factor=alignment_factor,
+        visual_range=perception_radius
+    )
+    
+    # Set the arrival rate for the simulation
+    sim.arrival_rate = arrival_rate
+    # Set the max_force (not originally included in constructor)
+    sim.max_force = max_force
+    
+    # Initialize a density grid
+    density_grid = np.zeros((sim.height, sim.width))
+    
+    # Run the simulation, tracking positions
+    for step in range(steps):
+        sim.step()
+        
+        # Record current agent positions in the density grid
+        for agent in sim.agents:
+            x, y = int(agent[0]), int(agent[1])
+            if 0 <= x < sim.width and 0 <= y < sim.height:
+                density_grid[y, x] += 1
+                
+        # Print progress
+        if step % 100 == 0:
+            print(f"Step {step}/{steps} - {len(sim.agents)} agents")
+    
+    # Set up the plot with styling
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(14, 12))
+    fig.patch.set_facecolor('#2A2A2A')
+    ax.set_facecolor('#2A2A2A')
+    
+    # Remove spines and ticks
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    
+    # Mask non-traversable areas in the density grid
+    masked_density = np.ma.masked_array(density_grid, mask=~sim.traversable_mask)
+    
+    # Create a composite visualization
+    # First, show the original blueprint as background
+    ax.imshow(sim.original_rgb, alpha=0.7)
+    
+    # Then overlay the heatmap
+    heatmap = ax.imshow(masked_density, cmap='viridis', alpha=0.7, interpolation='gaussian')
+    
+    # Add a colorbar
+    cbar = plt.colorbar(heatmap, ax=ax, pad=0.02)
+    cbar.set_label('Agent Density', color='white', fontfamily='monospace', fontsize=12)
+    cbar.ax.tick_params(colors='white')
+    
+    # Draw the entry points
+    if hasattr(sim, 'boundary_source_points') and len(sim.boundary_source_points) >= 2:
+        p1, p2 = sim.boundary_source_points
+        y1, x1 = p1
+        y2, x2 = p2
+        
+        # Draw a thick yellow line along the boundary segment
+        ax.plot([x1, x2], [y1, y2], color='#FFFF00', linestyle='-', linewidth=3)
+        
+        # Highlight the entry point
+        ax.scatter([sim.entry_x], [sim.entry_y], color='#FFFF00', s=100, marker='*')
+    else:
+        # Fallback: mark the entry point with a yellow star
+        ax.scatter([sim.entry_x], [sim.entry_y], color='#FFFF00', s=100, marker='*')
+    
+    # Add title and labels
+    ax.set_title('Social Animals™\nDog Park Density Heatmap', 
+                fontsize=18, fontweight='bold', color='white',
+                fontfamily='monospace', pad=20)
+    
+    # Add simulation parameters as text
+    param_text = (
+        f'SIMULATION DETAILS:\n'
+        f'COHESION: {cohesion_factor:.1f}\n'
+        f'SEPARATION: {separation_factor:.1f}\n'
+        f'ALIGNMENT: {alignment_factor:.1f}\n'
+        f'STEPS: {steps}'
+    )
+    plt.figtext(0.02, 0.02, param_text, fontfamily='monospace', 
+                color='white', fontsize=12)
+    
+    plt.tight_layout()
+    plt.savefig("flocking_heatmap.png", dpi=150)
+    plt.show()
+    
+    return density_grid
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Run the flocking dog park simulation')
+    parser.add_argument('image_path', type=str, help='Path to the blueprint image')
+    parser.add_argument('--arrival_rate', type=float, default=0.1, help='Agent arrival rate (0-1)')
+    parser.add_argument('--cohesion', type=float, default=0.5, help='Cohesion factor (0-1)')
+    parser.add_argument('--separation', type=float, default=0.5, help='Separation factor (0-1)')
+    parser.add_argument('--alignment', type=float, default=0.5, help='Alignment factor (0-1)')
+    parser.add_argument('--perception', type=int, default=20, help='Perception radius')
+    parser.add_argument('--max_force', type=float, default=1.0, help='Maximum steering force')
+    parser.add_argument('--steps', type=int, default=1000, help='Number of simulation steps')
+    parser.add_argument('--heatmap', action='store_true', help='Generate heatmap instead of animation')
+    
+    args = parser.parse_args()
+    
+    if args.heatmap:
+        generate_flocking_heatmap(
+            image_path=args.image_path,
+            arrival_rate=args.arrival_rate,
+            steps=args.steps,
+            cohesion_factor=args.cohesion,
+            separation_factor=args.separation,
+            alignment_factor=args.alignment,
+            perception_radius=args.perception,
+            max_force=args.max_force
+        )
+    else:
+        visualize_flocking_simulation(
+            image_path=args.image_path,
+            steps=args.steps,
+            arrival_rate=args.arrival_rate,
+            cohesion_factor=args.cohesion,
+            separation_factor=args.separation,
+            alignment_factor=args.alignment,
+            perception_radius=args.perception,
+            max_force=args.max_force
+        ) 
