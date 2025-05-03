@@ -2,7 +2,7 @@
 source venv/bin/activate
 
 # Default values
-IMAGE_PATH="data/blue_print_cropped.png"
+LAYOUT_PATH="layouts/processed_space.pkl"
 STEPS=10000
 ARRIVAL_RATE=0.1
 TEMPERATURE=0.8
@@ -16,8 +16,8 @@ GENERATE_HEATMAP=false
 # Process command line arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --image)
-      IMAGE_PATH="$2"
+    --layout)
+      LAYOUT_PATH="$2"
       shift 2
       ;;
     --steps)
@@ -64,7 +64,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Build the command
-CMD="python src/flocking_simulation.py \"$IMAGE_PATH\" --steps $STEPS --arrival_rate $ARRIVAL_RATE --cohesion $COHESION --separation $SEPARATION --alignment $ALIGNMENT --perception $PERCEPTION --max_force $MAX_FORCE"
+CMD="python src/flocking_simulation.py --layout \"$LAYOUT_PATH\" --steps $STEPS --arrival_rate $ARRIVAL_RATE --cohesion $COHESION --separation $SEPARATION --alignment $ALIGNMENT --perception $PERCEPTION --max_force $MAX_FORCE"
 
 # Add heatmap flag and temperature if needed
 if [ "$GENERATE_HEATMAP" = true ]; then

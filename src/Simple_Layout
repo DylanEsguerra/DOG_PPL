@@ -1,0 +1,27 @@
+import numpy as np
+import pickle
+
+height, width = 20, 50
+traversable_mask = np.ones((height, width), dtype=bool)
+obstacle_mask = np.zeros((height, width), dtype=bool)
+red_boundary_mask = np.zeros((height, width), dtype=bool)
+original_rgb = np.zeros((height, width, 3), dtype=np.uint8) + 255  # white background
+
+# Source: leftmost column
+boundary_source_points = [(0, 0), (height-1, 0)]
+entry_point = (height // 2, 0)
+
+layout = {
+    'traversable_mask': traversable_mask,
+    'obstacle_mask': obstacle_mask,
+    'white_obstacle_mask': np.zeros_like(traversable_mask),
+    'red_boundary_mask': red_boundary_mask,
+    'height': height,
+    'width': width,
+    'entry_point': entry_point,
+    'boundary_source_points': boundary_source_points,
+    'original_rgb': original_rgb
+}
+
+with open('layouts/simple_layout.pkl', 'wb') as f:
+    pickle.dump(layout, f)

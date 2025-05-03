@@ -10,218 +10,40 @@ import sys
 import matplotlib.transforms
 import matplotlib.markers
 from matplotlib.widgets import Slider
+import pickle
+
+
+def load_preprocessed_space(layout_path):
+    """Load preprocessed space data from a pickle file."""
+    with open(layout_path, 'rb') as f:
+        data = pickle.load(f)
+    return data
+
 
 class FlockingDogParkSimulation:
-    def __init__(self, image_path, cohesion_factor=0.5, 
+    def __init__(self, space_data, cohesion_factor=0.5, 
                  separation_factor=0.5, alignment_factor=0.5, visual_range=20):
-        """Initialize the flocking dog park simulation with traditional BOIDS parameters.
-        
-        Args:
-            image_path (str): Path to the blueprint image
-            cohesion_factor (float): How much agents are attracted to each other (0-1)
-            separation_factor (float): How much agents avoid each other (0-1)
-            alignment_factor (float): How much agents align their velocity with others (0-1)
-            visual_range (int): How far agents can perceive other agents
-        """
-        self.image_path = image_path
+        """Initialize the flocking dog park simulation with preprocessed space data."""
         self.cohesion_factor = cohesion_factor
         self.separation_factor = separation_factor
         self.alignment_factor = alignment_factor
         self.visual_range = visual_range
-        
-        # Fixed parameters
         self.max_speed = 2.0
         self.min_speed = 0.5
         self.max_force = 0.1
-        self.arrival_rate = 0.05  # Fixed arrival rate
-        
-        # Load and process the blueprint image
-        self.load_image()
-        
-        # Set entry point (source) similar to diffusion simulation
-        self.set_entry_point()
-        
-        # Initialize list of agents 
-        # Each agent is [x, y, vx, vy]
-        self.agents = []
-    
-    def load_image(self):
-        """Load and process the blueprint image to create traversable and obstacle masks based on red boundary and white obstacles."""
-        # Read the image
-        self.original_image = cv2.imread(self.image_path)
-        if self.original_image is None:
-            raise ValueError(f"Could not load image at {self.image_path}")
-        
-        # Convert to RGB (from BGR)
-        self.original_rgb = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGB)
-        
-        # Extract red boundaries
-        # Define the red color range (adjusting to better detect the red boundary)
-        lower_red1 = np.array([150, 0, 0])    # First range of red
-        upper_red1 = np.array([255, 100, 100])
-        
-        # Create mask for red boundaries
-        red_mask = cv2.inRange(self.original_rgb, lower_red1, upper_red1)
-        
-        # Dilate to make sure the boundary is continuous
-        kernel = np.ones((3, 3), np.uint8)
-        red_mask = cv2.dilate(red_mask, kernel, iterations=1)
-        
-        # Create a temporary image to work with
-        h, w = red_mask.shape
-        temp_image = np.zeros((h, w), dtype=np.uint8)
-        temp_image[red_mask > 0] = 255
-        
-        # Create a copy of the image for contour finding
-        contour_image = temp_image.copy()
-        
-        # Find contours
-        contours, _ = cv2.findContours(contour_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Create mask for the area inside the red boundary
-        traversable_mask = np.zeros_like(temp_image, dtype=bool)
-        
-        if contours:
-            # Find the largest contour (should be the red boundary)
-            largest_contour = max(contours, key=cv2.contourArea)
-            
-            # Create a mask of the inside of the contour
-            mask = np.zeros_like(temp_image)
-            cv2.drawContours(mask, [largest_contour], 0, 255, -1)  # -1 means fill
-            
-            # Set the traversable area to be inside the contour, excluding the boundary itself
-            traversable_mask = (mask > 0) & (red_mask == 0)
-        
-        # Set the traversable mask
-        self.traversable_mask = traversable_mask
-        
-        # Store the red boundary mask for entry point detection
-        self.red_boundary_mask = red_mask > 0
-        self.height, self.width = self.traversable_mask.shape
-
-        # Detect white obstacles (tables and chairs)
-        # White: high R, G, B values, but not red boundary
-        lower_white = np.array([220, 220, 220])
-        upper_white = np.array([255, 255, 255])
-        white_mask = cv2.inRange(self.original_rgb, lower_white, upper_white)
-        # Only consider white inside the traversable area
-        white_obstacle_mask = (white_mask > 0) & self.traversable_mask
-        self.white_obstacle_mask = white_obstacle_mask
-
-        # Update obstacle mask to include white obstacles
-        self.obstacle_mask = ~self.traversable_mask | self.white_obstacle_mask
-
-        # Find contours in the white obstacle mask
-        white_obstacle_mask_uint8 = white_obstacle_mask.astype(np.uint8) * 255
-        contours, _ = cv2.findContours(white_obstacle_mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Minimum area threshold (tune as needed)
-        min_area = 500
-
-        # Create a new mask for filtered obstacles (must be uint8 for OpenCV)
-        filtered_white_obstacle_mask = np.zeros_like(white_obstacle_mask, dtype=np.uint8)
-
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area >= min_area:
-                cv2.drawContours(filtered_white_obstacle_mask, [cnt], -1, 1, -1)  # Fill the contour
-
-        # Convert back to boolean mask
-        self.white_obstacle_mask = filtered_white_obstacle_mask.astype(bool)
-        # Update obstacle mask to use the filtered white obstacles
-        self.obstacle_mask = ~self.traversable_mask | self.white_obstacle_mask
-
-        print(f"Image processed: {self.width}x{self.height}")
-        print(f"Traversable area: {np.sum(self.traversable_mask)} pixels")
-        print(f"White obstacles detected: {np.sum(self.white_obstacle_mask)} pixels")
-    
-    def set_entry_point(self):
-        """Set the entry point using explicitly defined coordinates on the red boundary."""
-        # User-specified coordinates from plot digitizer
-        # Need to find the closest points on the red boundary to these coordinates
-        user_points = [
-            (384.98, 62.11),  # (y, x) format as used in our implementation
-            (327.06, 63.16)   # (y, x) format
-        ]
-        
-        # Find all points on the red boundary
-        boundary_points = []
-        for y in range(self.height):
-            for x in range(self.width):
-                if self.red_boundary_mask[y, x]:
-                    boundary_points.append((y, x))
-        
-        # Find the closest boundary points to the user-specified points
-        closest_boundary_points = []
-        for user_y, user_x in user_points:
-            closest_dist = float('inf')
-            closest_point = None
-            
-            for bound_y, bound_x in boundary_points:
-                # Calculate Euclidean distance
-                dist = (bound_y - user_y)**2 + (bound_x - user_x)**2
-                if dist < closest_dist:
-                    closest_dist = dist
-                    closest_point = (bound_y, bound_x)
-            
-            if closest_point:
-                closest_boundary_points.append(closest_point)
-            else:
-                # Fallback if no boundary point is found (shouldn't happen)
-                closest_boundary_points.append((int(user_y), int(user_x)))
-        
-        # If we found two boundary points, use them to define the entry area
-        if len(closest_boundary_points) == 2:
-            # Calculate the midpoint between the two boundary points
-            y1, x1 = closest_boundary_points[0]
-            y2, x2 = closest_boundary_points[1]
-            
-            # Set the entry point as the midpoint
-            mid_y = (y1 + y2) // 2
-            mid_x = (x1 + x2) // 2
-            
-            # Find a traversable point near this midpoint
-            found_traversable = False
-            search_radius = 10
-            
-            while not found_traversable and search_radius < 30:
-                for dy in range(-search_radius, search_radius + 1):
-                    for dx in range(-search_radius, search_radius + 1):
-                        ny, nx = mid_y + dy, mid_x + dx
-                        if (0 <= ny < self.height and 0 <= nx < self.width and 
-                            self.traversable_mask[ny, nx]):
-                            # Found a traversable point
-                            self.entry_point = (ny, nx)
-                            found_traversable = True
-                            break
-                    if found_traversable:
-                        break
-                
-                # Increase search radius if no traversable point was found
-                search_radius += 5
-            
-            # If still no traversable point was found, use the midpoint anyway
-            if not found_traversable:
-                self.entry_point = (mid_y, mid_x)
-                
-            # Store the boundary points for visualization and entry point setting
-            self.boundary_source_points = closest_boundary_points
-        else:
-            # Fallback if we don't have exactly two points
-            # Just use the first boundary point we found or a default
-            if boundary_points:
-                self.entry_point = boundary_points[0]
-                self.boundary_source_points = [boundary_points[0]]
-            else:
-                # Safe fallback - middle of left edge
-                self.entry_point = (self.height // 2, 10)
-                self.boundary_source_points = [self.entry_point]
-        
-        print(f"Entry point set at: {self.entry_point}")
-        print(f"Boundary source points: {self.boundary_source_points}")
-        
-        # Store entry point coordinates for easier access
+        self.arrival_rate = 0.05
+        # Load preprocessed data
+        self.traversable_mask = space_data['traversable_mask']
+        self.obstacle_mask = space_data['obstacle_mask']
+        self.white_obstacle_mask = space_data['white_obstacle_mask']
+        self.red_boundary_mask = space_data['red_boundary_mask']
+        self.height = space_data['height']
+        self.width = space_data['width']
+        self.entry_point = space_data['entry_point']
+        self.boundary_source_points = space_data['boundary_source_points']
+        self.original_rgb = space_data['original_rgb']
         self.entry_y, self.entry_x = self.entry_point
+        self.agents = []
     
     def add_agent(self):
         """Add a new agent at the entry point with random initial velocity."""
@@ -470,48 +292,20 @@ class FlockingDogParkSimulation:
         velocities = np.array([agent[2:4] for agent in self.agents])
         return velocities
 
-    def visualize_and_approve_obstacles(self):
-        """Show the detected obstacles (white) over the blueprint and ask for user approval."""
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle
-        # Create an overlay image
-        overlay = self.original_rgb.copy()
-        # Mark white obstacles in magenta
-        overlay[self.white_obstacle_mask] = [255, 0, 255]
-        plt.figure(figsize=(14, 10))
-        ax = plt.gca()
-        ax.imshow(overlay, origin='upper')
-        ax.set_aspect('equal')
-        ax.set_xlim(0, self.width)
-        ax.set_ylim(self.height, 0)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        plt.title('Detected Obstacles (magenta) over Blueprint')
-        plt.tight_layout()
-        plt.show()
-        # Ask for approval
-        resp = input("Do you approve the detected obstacles? (y/n): ")
-        if resp.strip().lower() != 'y':
-            print("Obstacle detection not approved. Please adjust detection logic or blueprint.")
-            sys.exit(1)
 
-
-def visualize_flocking_simulation(image_path, steps=1000, arrival_rate=0.1, 
+def visualize_flocking_simulation(space_data, steps=1000, arrival_rate=0.1, 
                                   cohesion_factor=0.5, separation_factor=0.5, 
                                   alignment_factor=0.5, perception_radius=20,
                                   max_force=0.1):
     """Visualize the flocking simulation using the blueprint layout with triangles showing movement direction."""
     # Create simulation with blueprint layout
     sim = FlockingDogParkSimulation(
-        image_path=image_path,
+        space_data=space_data,
         cohesion_factor=cohesion_factor,
         separation_factor=separation_factor,
         alignment_factor=alignment_factor,
         visual_range=perception_radius
     )
-    
-    # Ask user to approve detected obstacles before proceeding
-    sim.visualize_and_approve_obstacles()
     
     # Set arrival rate and max force
     sim.arrival_rate = arrival_rate
@@ -764,7 +558,7 @@ def visualize_flocking_simulation(image_path, steps=1000, arrival_rate=0.1,
     return sim
 
 
-def generate_flocking_heatmap(image_path, steps=1000, arrival_rate=0.1, 
+def generate_flocking_heatmap(space_data, steps=1000, arrival_rate=0.1, 
                              cohesion_factor=0.5, 
                              separation_factor=0.5, alignment_factor=0.5,
                              perception_radius=10, max_force=1.0):
@@ -772,15 +566,12 @@ def generate_flocking_heatmap(image_path, steps=1000, arrival_rate=0.1,
     
     # Create simulation with blueprint layout
     sim = FlockingDogParkSimulation(
-        image_path=image_path,
+        space_data=space_data,
         cohesion_factor=cohesion_factor,
         separation_factor=separation_factor,
         alignment_factor=alignment_factor,
         visual_range=perception_radius
     )
-    
-    # Ask user to approve detected obstacles before proceeding
-    sim.visualize_and_approve_obstacles()
     
     # Set the arrival rate for the simulation
     sim.arrival_rate = arrival_rate
@@ -873,7 +664,7 @@ def generate_flocking_heatmap(image_path, steps=1000, arrival_rate=0.1,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run the flocking dog park simulation')
-    parser.add_argument('image_path', type=str, help='Path to the blueprint image')
+    parser.add_argument('--layout', type=str, required=True, help='Path to the preprocessed space layout file (pickle)')
     parser.add_argument('--arrival_rate', type=float, default=0.1, help='Agent arrival rate (0-1)')
     parser.add_argument('--cohesion', type=float, default=0.5, help='Cohesion factor (0-1)')
     parser.add_argument('--separation', type=float, default=0.5, help='Separation factor (0-1)')
@@ -884,10 +675,10 @@ if __name__ == "__main__":
     parser.add_argument('--heatmap', action='store_true', help='Generate heatmap instead of animation')
     
     args = parser.parse_args()
-    
+    space_data = load_preprocessed_space(args.layout)
     if args.heatmap:
         generate_flocking_heatmap(
-            image_path=args.image_path,
+            space_data=space_data,
             arrival_rate=args.arrival_rate,
             steps=args.steps,
             cohesion_factor=args.cohesion,
@@ -898,7 +689,7 @@ if __name__ == "__main__":
         )
     else:
         visualize_flocking_simulation(
-            image_path=args.image_path,
+            space_data=space_data,
             steps=args.steps,
             arrival_rate=args.arrival_rate,
             cohesion_factor=args.cohesion,
