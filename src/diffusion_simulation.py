@@ -565,7 +565,7 @@ if __name__ == "__main__":
     parser.add_argument('--layout', type=str, required=True, help='Path to the preprocessed space layout file (pickle)')
     parser.add_argument('--diffusion', type=float, default=1.0, help='Diffusion coefficient')
     parser.add_argument('--convection_x', type=float, default=0.5, help='Convection in x direction')
-    parser.add_argument('--convection_y', type=float, default=0.0, help='Convection in y direction')
+    parser.add_argument('--convection_y', type=float, default=-0.1, help='Convection in y direction')
     parser.add_argument('--dt', type=float, default=0.1, help='Time step')
     parser.add_argument('--steps', type=int, default=500, help='Number of simulation steps')
     parser.add_argument('--heatmap', action='store_true', help='Generate heatmap instead of animation')

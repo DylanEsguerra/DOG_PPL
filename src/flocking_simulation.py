@@ -311,7 +311,7 @@ def visualize_flocking_simulation(space_data, steps=1000, arrival_rate=0.05,
     )
     sim.arrival_rate = arrival_rate
     sim.max_force = max_force
-    sim.add_random_agents(50)
+    sim.add_random_agents(100)
     
     # Set up the plot with new style
     plt.style.use('dark_background')
@@ -575,7 +575,7 @@ def generate_flocking_heatmap(space_data, steps=1000, arrival_rate=0.05,
     # --- End add ---
     sim.arrival_rate = arrival_rate
     sim.max_force = max_force
-    sim.add_random_agents(50)
+    sim.add_random_agents(100)
     
     # Initialize a density grid
     density_grid = np.zeros((sim.height, sim.width))
