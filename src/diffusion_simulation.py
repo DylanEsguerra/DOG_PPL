@@ -33,6 +33,14 @@ class DiffusionSimulation:
         self.boundary_source_points = space_data['boundary_source_points']
         self.original_rgb = space_data['original_rgb']
         
+        # Load obstacle masks
+        if 'white_obstacle_mask' in space_data:
+            self.white_obstacle_mask = space_data['white_obstacle_mask']
+        if 'grey_obstacle_mask' in space_data:
+            self.grey_obstacle_mask = space_data['grey_obstacle_mask']
+        elif 'obstacle_mask' in space_data:
+            self.obstacle_mask = space_data['obstacle_mask']
+        
         # Initialize concentration grid
         self.concentration = np.zeros((self.height, self.width))
         
@@ -40,52 +48,48 @@ class DiffusionSimulation:
         self.setup_source_points()
     
     def setup_source_points(self):
-        """Set up source points as all traversable pixels adjacent to the red boundary segment between endpoints."""
+        """Set up source points as traversable pixels adjacent to the red boundary segment between endpoints."""
         self.source_points = []
-        if self.boundary_source_points and len(self.boundary_source_points) >= 2:
-            p1, p2 = self.boundary_source_points
-            y1, x1 = p1
-            y2, x2 = p2
-            
-            # Instead of using a straight line, find all red boundary pixels 
-            # We will check if they're part of the boundary segment later
-            boundary_pixels = []
-            for y in range(self.height):
-                for x in range(self.width):
-                    if self.red_boundary_mask[y, x]:
-                        boundary_pixels.append((y, x))
-            
-            # Find the boundary pixels that are on the segment between p1 and p2
-            # We'll filter boundary pixels based on being inside the bounding box of p1 and p2
-            # (with some tolerance to account for non-straight boundaries)
-            min_y = min(y1, y2) - 10
-            max_y = max(y1, y2) + 10
-            min_x = min(x1, x2) - 10
-            max_x = max(x1, x2) + 10
-            
-            segment_boundary_pixels = []
-            for y, x in boundary_pixels:
-                if min_y <= y <= max_y and min_x <= x <= max_x:
-                    segment_boundary_pixels.append((y, x))
-            
-            # For every traversable pixel, check if it is adjacent to a red boundary pixel on the segment
+        if self.boundary_source_points and len(self.boundary_source_points) == 2:
+            # Get the two endpoints
+            (y0, x0), (y1, x1) = self.boundary_source_points
+            # Get all points along the segment using Bresenham's algorithm
+            segment_pixels = self.bresenham_line(x0, y0, x1, y1)
+            segment_boundary_pixels = set((y, x) for x, y in segment_pixels)
+            # For every traversable pixel, check if it is adjacent to any boundary pixel in the segment
             for y in range(self.height):
                 for x in range(self.width):
                     if self.traversable_mask[y, x] and not self.red_boundary_mask[y, x]:
-                        # Check 8-neighborhood for a red boundary pixel on the segment
                         for dy in [-1, 0, 1]:
                             for dx in [-1, 0, 1]:
                                 if dy == 0 and dx == 0:
                                     continue
                                 ny, nx = y + dy, x + dx
                                 if (0 <= ny < self.height and 0 <= nx < self.width and
-                                    self.red_boundary_mask[ny, nx] and (ny, nx) in segment_boundary_pixels):
+                                    (ny, nx) in segment_boundary_pixels):
                                     self.source_points.append((y, x))
                                     break
                             else:
                                 continue
                             break
-        
+        elif self.boundary_source_points and len(self.boundary_source_points) > 2:
+            # If boundary_source_points is a list of many points (e.g., full wall), treat all as the segment
+            segment_boundary_pixels = set(self.boundary_source_points)
+            for y in range(self.height):
+                for x in range(self.width):
+                    if self.traversable_mask[y, x] and not self.red_boundary_mask[y, x]:
+                        for dy in [-1, 0, 1]:
+                            for dx in [-1, 0, 1]:
+                                if dy == 0 and dx == 0:
+                                    continue
+                                ny, nx = y + dy, x + dx
+                                if (0 <= ny < self.height and 0 <= nx < self.width and
+                                    (ny, nx) in segment_boundary_pixels):
+                                    self.source_points.append((y, x))
+                                    break
+                            else:
+                                continue
+                            break
         # Fallback: if no source points found, use traversable pixels near entry_point
         if not self.source_points:
             y_entry, x_entry = self.entry_point
@@ -95,14 +99,11 @@ class DiffusionSimulation:
                     if (0 <= ny < self.height and 0 <= nx < self.width and
                         self.traversable_mask[ny, nx] and not self.red_boundary_mask[ny, nx]):
                         self.source_points.append((ny, nx))
-        
         # Make the list of source points unique
         self.source_points = list(set(self.source_points))
-        
         # Set initial concentration for source points
         for y, x in self.source_points:
             self.concentration[y, x] = 1.0
-            
         # Debug print
         print(f"[DEBUG] Number of source points: {len(self.source_points)}")
         print(f"[DEBUG] Source points: {self.source_points[:10]}{'...' if len(self.source_points) > 10 else ''}")
@@ -136,8 +137,10 @@ class DiffusionSimulation:
     
     def step_vectorized(self, dt=0.1):
         """Perform one step of the diffusion-convection simulation using vectorized operations."""
-        # Create a valid cell mask (traversable and not boundary)
-        valid_mask = self.traversable_mask & (~self.red_boundary_mask)
+        # Create a valid cell mask (traversable and not boundary and not obstacle)
+        valid_mask = self.traversable_mask & (~self.red_boundary_mask) & (~self.white_obstacle_mask if hasattr(self, 'white_obstacle_mask') else True)
+        if hasattr(self, 'grey_obstacle_mask'):
+            valid_mask = valid_mask & (~self.grey_obstacle_mask)
         # Remove border cells to avoid index errors
         valid_mask[0, :] = valid_mask[-1, :] = valid_mask[:, 0] = valid_mask[:, -1] = False
         
@@ -154,26 +157,49 @@ class DiffusionSimulation:
         c_left[:, -1] = c[:, -1]
         c_right[:, 0] = c[:, 0]
         
-        # Calculate diffusion term (Laplacian)
-        laplacian_x = c_left + c_right - 2 * c
-        laplacian_y = c_up + c_down - 2 * c
+        # Create masks for valid neighbors
+        up_valid = np.roll(valid_mask, 1, axis=0)    # If cell above is valid
+        down_valid = np.roll(valid_mask, -1, axis=0) # If cell below is valid
+        left_valid = np.roll(valid_mask, 1, axis=1)  # If cell to left is valid
+        right_valid = np.roll(valid_mask, -1, axis=1)# If cell to right is valid
+        
+        # Fix boundary conditions for masks
+        up_valid[0, :] = False
+        down_valid[-1, :] = False
+        left_valid[:, 0] = False
+        right_valid[:, -1] = False
+        
+        # Create laplacian terms only for valid neighbors (blocking diffusion through obstacles)
+        laplacian_x = np.zeros_like(c)
+        laplacian_y = np.zeros_like(c)
+        
+        # Only add contribution from valid neighbors
+        laplacian_x[valid_mask & left_valid] += c_left[valid_mask & left_valid] - c[valid_mask & left_valid]
+        laplacian_x[valid_mask & right_valid] += c_right[valid_mask & right_valid] - c[valid_mask & right_valid]
+        laplacian_y[valid_mask & up_valid] += c_up[valid_mask & up_valid] - c[valid_mask & up_valid]
+        laplacian_y[valid_mask & down_valid] += c_down[valid_mask & down_valid] - c[valid_mask & down_valid]
+        
+        # Scale based on number of valid neighbors to maintain proportional diffusion
+        valid_neighbor_count = (up_valid & valid_mask).astype(int) + (down_valid & valid_mask).astype(int) + \
+                              (left_valid & valid_mask).astype(int) + (right_valid & valid_mask).astype(int)
+        valid_neighbor_count = np.maximum(valid_neighbor_count, 1)  # Prevent division by zero
         diffusion = self.diffusion_coeff * (laplacian_x + laplacian_y)
         
-        # Upwind convection scheme (corrected):
+        # Upwind convection scheme with obstacle blocking:
         # For X direction: if convection_x > 0 use c - c_left (backward), if < 0 use c_right - c (forward)
         # For Y direction: if convection_y > 0 use c - c_up (backward), if < 0 use c_down - c (forward)
         grad_x = np.zeros_like(c)
         grad_y = np.zeros_like(c)
+        
         if self.convection_x > 0:
-            grad_x[valid_mask] = c[valid_mask] - c_left[valid_mask]
+            grad_x[valid_mask & left_valid] = c[valid_mask & left_valid] - c_left[valid_mask & left_valid]
         elif self.convection_x < 0:
-            grad_x[valid_mask] = c_right[valid_mask] - c[valid_mask]
-        # If convection_x == 0, grad_x stays zero
+            grad_x[valid_mask & right_valid] = c_right[valid_mask & right_valid] - c[valid_mask & right_valid]
+        
         if self.convection_y > 0:
-            grad_y[valid_mask] = c[valid_mask] - c_up[valid_mask]
+            grad_y[valid_mask & up_valid] = c[valid_mask & up_valid] - c_up[valid_mask & up_valid]
         elif self.convection_y < 0:
-            grad_y[valid_mask] = c_down[valid_mask] - c[valid_mask]
-        # If convection_y == 0, grad_y stays zero
+            grad_y[valid_mask & down_valid] = c_down[valid_mask & down_valid] - c[valid_mask & down_valid]
         
         # No negative sign: convection moves in the direction of velocity
         convection = self.convection_x * grad_x + self.convection_y * grad_y
@@ -211,7 +237,7 @@ def visualize_diffusion_simulation(space_data, steps=500, diffusion_coeff=0.5,
     
     # Set up the plot with styling
     plt.style.use('dark_background')
-    fig = plt.figure(figsize=(14, 10))
+    fig = plt.figure(figsize=(20, 10))
     
     # Create grid for main plot and sliders
     gs = plt.GridSpec(16, 1)
@@ -243,10 +269,19 @@ def visualize_diffusion_simulation(space_data, steps=500, diffusion_coeff=0.5,
     # Display the original blueprint
     ax.imshow(sim.original_rgb, alpha=0.6)
     
-    # Initialize the concentration plot
+    # Create mask for all obstacles to exclude from concentration display
+    obstacle_mask = sim.red_boundary_mask.copy()
+    if hasattr(sim, 'white_obstacle_mask'):
+        obstacle_mask = obstacle_mask | sim.white_obstacle_mask
+    if hasattr(sim, 'grey_obstacle_mask'):
+        obstacle_mask = obstacle_mask | sim.grey_obstacle_mask
+    elif hasattr(sim, 'obstacle_mask'):
+        obstacle_mask = obstacle_mask | sim.obstacle_mask
+    
+    # Initialize the concentration plot with masked obstacles
     masked_concentration = np.ma.masked_array(
         sim.concentration, 
-        mask=~sim.traversable_mask | sim.red_boundary_mask
+        mask=~sim.traversable_mask | obstacle_mask
     )
     concentration_plot = ax.imshow(
         masked_concentration, 
@@ -254,6 +289,15 @@ def visualize_diffusion_simulation(space_data, steps=500, diffusion_coeff=0.5,
         alpha=0.8,
         vmin=0, vmax=1
     )
+    
+    # Draw obstacles with distinct colors if available
+    if hasattr(sim, 'white_obstacle_mask') and np.any(sim.white_obstacle_mask):
+        white_y, white_x = np.where(sim.white_obstacle_mask)
+        ax.scatter(white_x, white_y, color='magenta', s=5, alpha=0.6)
+    
+    if hasattr(sim, 'grey_obstacle_mask') and np.any(sim.grey_obstacle_mask):
+        grey_y, grey_x = np.where(sim.grey_obstacle_mask)
+        ax.scatter(grey_x, grey_y, color='blue', s=5, alpha=0.6)
     
     # Draw source points
     source_y = [y for y, x in sim.source_points]
@@ -331,9 +375,18 @@ def visualize_diffusion_simulation(space_data, steps=500, diffusion_coeff=0.5,
     
     def init():
         # Initial state
+        # Create mask for all obstacles
+        obstacle_mask = sim.red_boundary_mask.copy()
+        if hasattr(sim, 'white_obstacle_mask'):
+            obstacle_mask = obstacle_mask | sim.white_obstacle_mask
+        if hasattr(sim, 'grey_obstacle_mask'):
+            obstacle_mask = obstacle_mask | sim.grey_obstacle_mask
+        elif hasattr(sim, 'obstacle_mask'):
+            obstacle_mask = obstacle_mask | sim.obstacle_mask
+            
         masked_concentration = np.ma.masked_array(
             sim.concentration, 
-            mask=~sim.traversable_mask | sim.red_boundary_mask
+            mask=~sim.traversable_mask | obstacle_mask
         )
         concentration_plot.set_array(masked_concentration)
         status_text.set_text('')
@@ -347,10 +400,18 @@ def visualize_diffusion_simulation(space_data, steps=500, diffusion_coeff=0.5,
         for _ in range(steps_per_frame):
             sim.step(dt=current_dt)
         
-        # Update concentration plot
+        # Update concentration plot with obstacle masking
+        obstacle_mask = sim.red_boundary_mask.copy()
+        if hasattr(sim, 'white_obstacle_mask'):
+            obstacle_mask = obstacle_mask | sim.white_obstacle_mask
+        if hasattr(sim, 'grey_obstacle_mask'):
+            obstacle_mask = obstacle_mask | sim.grey_obstacle_mask
+        elif hasattr(sim, 'obstacle_mask'):
+            obstacle_mask = obstacle_mask | sim.obstacle_mask
+            
         masked_concentration = np.ma.masked_array(
             sim.concentration, 
-            mask=~sim.traversable_mask | sim.red_boundary_mask
+            mask=~sim.traversable_mask | obstacle_mask
         )
         concentration_plot.set_array(masked_concentration)
         
@@ -398,7 +459,7 @@ def generate_diffusion_heatmap(space_data, steps=1000, diffusion_coeff=0.5,
     
     # Set up the plot with styling
     plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(14, 12))
+    fig, ax = plt.subplots(figsize=(20, 10))
     fig.patch.set_facecolor('#2A2A2A')
     ax.set_facecolor('#2A2A2A')
     
@@ -410,10 +471,19 @@ def generate_diffusion_heatmap(space_data, steps=1000, diffusion_coeff=0.5,
     ax.set_xticks([])
     ax.set_yticks([])
     
+    # Create full obstacle mask for visualization
+    obstacle_mask = sim.red_boundary_mask.copy()
+    if hasattr(sim, 'white_obstacle_mask'):
+        obstacle_mask = obstacle_mask | sim.white_obstacle_mask
+    if hasattr(sim, 'grey_obstacle_mask'):
+        obstacle_mask = obstacle_mask | sim.grey_obstacle_mask
+    elif hasattr(sim, 'obstacle_mask'):
+        obstacle_mask = obstacle_mask | sim.obstacle_mask
+    
     # Mask non-traversable areas in the concentration grid
     masked_concentration = np.ma.masked_array(
         sim.concentration, 
-        mask=~sim.traversable_mask | sim.red_boundary_mask
+        mask=~sim.traversable_mask | obstacle_mask
     )
     
     # Create a composite visualization
@@ -422,6 +492,15 @@ def generate_diffusion_heatmap(space_data, steps=1000, diffusion_coeff=0.5,
     
     # Then overlay the heatmap
     heatmap = ax.imshow(masked_concentration, cmap='viridis', alpha=0.8, vmin=0, vmax=1)
+    
+    # Draw obstacles with distinct colors if available
+    if hasattr(sim, 'white_obstacle_mask') and np.any(sim.white_obstacle_mask):
+        white_y, white_x = np.where(sim.white_obstacle_mask)
+        ax.scatter(white_x, white_y, color='magenta', s=5, alpha=0.6)
+    
+    if hasattr(sim, 'grey_obstacle_mask') and np.any(sim.grey_obstacle_mask):
+        grey_y, grey_x = np.where(sim.grey_obstacle_mask)
+        ax.scatter(grey_x, grey_y, color='blue', s=5, alpha=0.6)
     
     # Add a colorbar
     cbar = plt.colorbar(heatmap, ax=ax, pad=0.02)
@@ -451,7 +530,9 @@ def generate_diffusion_heatmap(space_data, steps=1000, diffusion_coeff=0.5,
                 color='white', fontsize=12)
     
     plt.tight_layout()
-    plt.savefig("diffusion_heatmap.png", dpi=150)
+    # --- Save figure in 'figures' directory ---
+    os.makedirs('figures', exist_ok=True)
+    plt.savefig(os.path.join('figures', "diffusion_heatmap.png"), dpi=150)
     plt.show()
     
     return sim.concentration
@@ -469,7 +550,10 @@ def downsample_space_data(space_data, scale=0.25):
     downsampled['original_rgb'] = resize_img(space_data['original_rgb'])
     downsampled['height'], downsampled['width'] = downsampled['traversable_mask'].shape
     # Scale entry and boundary points
-    downsampled['entry_point'] = tuple(int(round(x * scale)) for x in space_data['entry_point'])
+    if space_data['entry_point'] is not None:
+        downsampled['entry_point'] = tuple(int(round(x * scale)) for x in space_data['entry_point'])
+    else:
+        downsampled['entry_point'] = None
     downsampled['boundary_source_points'] = [
         tuple(int(round(x * scale)) for x in pt) for pt in space_data['boundary_source_points']
     ]
@@ -479,13 +563,13 @@ def downsample_space_data(space_data, scale=0.25):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run the diffusion simulation')
     parser.add_argument('--layout', type=str, required=True, help='Path to the preprocessed space layout file (pickle)')
-    parser.add_argument('--diffusion', type=float, default=0.5, help='Diffusion coefficient')
-    parser.add_argument('--convection_x', type=float, default=0.0, help='Convection in x direction')
-    parser.add_argument('--convection_y', type=float, default=0.0, help='Convection in y direction')
+    parser.add_argument('--diffusion', type=float, default=1.0, help='Diffusion coefficient')
+    parser.add_argument('--convection_x', type=float, default=0.5, help='Convection in x direction')
+    parser.add_argument('--convection_y', type=float, default=-0.1, help='Convection in y direction')
     parser.add_argument('--dt', type=float, default=0.1, help='Time step')
     parser.add_argument('--steps', type=int, default=500, help='Number of simulation steps')
     parser.add_argument('--heatmap', action='store_true', help='Generate heatmap instead of animation')
-    parser.add_argument('--downsample', type=float, default=None, help='Downsample scale for development (e.g. 0.25)')
+    parser.add_argument('--downsample', type=float, default=0.5, help='Downsample scale for development (e.g. 0.25)')
     args = parser.parse_args()
     space_data = load_preprocessed_space(args.layout)
     if args.downsample is not None:

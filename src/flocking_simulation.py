@@ -11,6 +11,8 @@ import matplotlib.transforms
 import matplotlib.markers
 from matplotlib.widgets import Slider
 import pickle
+import matplotlib.colors as mcolors
+from skimage.measure import block_reduce
 
 
 def load_preprocessed_space(layout_path):
@@ -22,7 +24,7 @@ def load_preprocessed_space(layout_path):
 
 class FlockingDogParkSimulation:
     def __init__(self, space_data, cohesion_factor=0.5, 
-                 separation_factor=0.5, alignment_factor=0.5, visual_range=20):
+                 separation_factor=0.5, alignment_factor=0.5, visual_range=20, death_rate=0.001):
         """Initialize the flocking dog park simulation with preprocessed space data."""
         self.cohesion_factor = cohesion_factor
         self.separation_factor = separation_factor
@@ -32,6 +34,7 @@ class FlockingDogParkSimulation:
         self.min_speed = 0.5
         self.max_force = 0.1
         self.arrival_rate = 0.05
+        self.death_rate = death_rate
         # Load preprocessed data
         self.traversable_mask = space_data['traversable_mask']
         self.obstacle_mask = space_data['obstacle_mask']
@@ -42,19 +45,26 @@ class FlockingDogParkSimulation:
         self.entry_point = space_data['entry_point']
         self.boundary_source_points = space_data['boundary_source_points']
         self.original_rgb = space_data['original_rgb']
-        self.entry_y, self.entry_x = self.entry_point
+        # Handle entry_point=None by picking a random boundary source point
+        if self.entry_point is None and self.boundary_source_points:
+            self.entry_y, self.entry_x = random.choice(self.boundary_source_points)
+        elif self.entry_point is not None:
+            self.entry_y, self.entry_x = self.entry_point
+        else:
+            raise ValueError("No entry point or boundary source points defined in layout.")
         self.agents = []
     
     def add_agent(self):
-        """Add a new agent at the entry point with random initial velocity."""
-        # Random velocity direction
+        """Add a new agent at the entry point or random boundary source point."""
+        if self.entry_point is None and self.boundary_source_points:
+            entry_y, entry_x = random.choice(self.boundary_source_points)
+        else:
+            entry_y, entry_x = self.entry_y, self.entry_x
         angle = random.uniform(0, 2 * np.pi)
         speed = random.uniform(self.min_speed, self.max_speed)
         vx = np.cos(angle) * speed
         vy = np.sin(angle) * speed
-        
-        # Add agent [x, y, vx, vy]
-        self.agents.append([self.entry_x, self.entry_y, vx, vy])
+        self.agents.append([entry_x, entry_y, vx, vy])
     
     def apply_separation(self, agent_index, nearby_agents):
         """Calculate separation force to avoid other agents using vectorized operations."""
@@ -220,68 +230,47 @@ class FlockingDogParkSimulation:
     
     def move_agents(self):
         """Move all agents using flocking behavior with optimized operations."""
-        # Convert agents to numpy array for vectorized operations
         if not self.agents:
             return
-            
-        # Process each agent
         for i in range(len(self.agents)):
-            # Find nearby agents
             nearby_agents = self.find_nearby_agents(i)
-            
-            # Calculate forces
             separation_x, separation_y = self.apply_separation(i, nearby_agents)
             cohesion_x, cohesion_y = self.apply_cohesion(i, nearby_agents)
             alignment_x, alignment_y = self.apply_alignment(i, nearby_agents)
             boundary_x, boundary_y = self.apply_boundary_avoidance(i)
-            
-            # Apply all forces to velocity
             self.agents[i][2] += separation_x + cohesion_x + alignment_x + boundary_x
             self.agents[i][3] += separation_y + cohesion_y + alignment_y + boundary_y
-            
-            # Limit speed
             self.agents[i][2], self.agents[i][3] = self.limit_speed(self.agents[i][2], self.agents[i][3])
-            
-            # Calculate new position
             new_x = self.agents[i][0] + self.agents[i][2]
             new_y = self.agents[i][1] + self.agents[i][3]
-            
-            # Check if new position is valid
             if self.is_valid_position(new_x, new_y):
                 self.agents[i][0] = new_x
                 self.agents[i][1] = new_y
             else:
-                # If not valid, try to find a valid position nearby or bounce
                 valid_move_found = False
-                for attempt in range(8):  # Try 8 directions
+                for attempt in range(8):
                     angle = 2 * np.pi * attempt / 8
                     test_x = self.agents[i][0] + np.cos(angle) * 2
                     test_y = self.agents[i][1] + np.sin(angle) * 2
-                    
                     if self.is_valid_position(test_x, test_y):
-                        # Found a valid position, move there and adjust velocity
                         self.agents[i][0] = test_x
                         self.agents[i][1] = test_y
-                        # Redirect velocity in this direction
                         speed = np.sqrt(self.agents[i][2]**2 + self.agents[i][3]**2)
                         self.agents[i][2] = np.cos(angle) * speed
                         self.agents[i][3] = np.sin(angle) * speed
                         valid_move_found = True
                         break
-                
                 if not valid_move_found:
-                    # Couldn't find valid position nearby, just reverse direction
                     self.agents[i][2] *= -1
                     self.agents[i][3] *= -1
     
     def step(self):
         """Perform one step of the simulation."""
-        # Add new agents with probability based on arrival rate
-        if random.random() < self.arrival_rate and len(self.agents) < 200:  # Limit total agents
+        if random.random() < self.arrival_rate and len(self.agents) < 200:
             self.add_agent()
-        
-        # Move existing agents
         self.move_agents()
+        # Remove agents with probability death_rate
+        self.agents = [agent for agent in self.agents if random.random() > self.death_rate]
     
     def get_agent_positions(self):
         """Return the positions of all agents."""
@@ -291,33 +280,42 @@ class FlockingDogParkSimulation:
         """Return numpy array of agent velocities"""
         velocities = np.array([agent[2:4] for agent in self.agents])
         return velocities
+    
+    def add_random_agents(self, n):
+        """Add n agents at random valid locations with random velocity (not in obstacles or boundaries)."""
+        valid_mask = self.traversable_mask & (~self.obstacle_mask) & (~self.red_boundary_mask)
+        traversable_indices = np.argwhere(valid_mask)
+        if len(traversable_indices) == 0:
+            return
+        chosen_indices = traversable_indices[np.random.choice(len(traversable_indices), size=n, replace=False)]
+        for y, x in chosen_indices:
+            angle = random.uniform(0, 2 * np.pi)
+            speed = random.uniform(self.min_speed, self.max_speed)
+            vx = np.cos(angle) * speed
+            vy = np.sin(angle) * speed
+            self.agents.append([x, y, vx, vy])
 
 
-def visualize_flocking_simulation(space_data, steps=1000, arrival_rate=0.1, 
+def visualize_flocking_simulation(space_data, steps=1000, arrival_rate=0.05, 
                                   cohesion_factor=0.5, separation_factor=0.5, 
                                   alignment_factor=0.5, perception_radius=20,
-                                  max_force=0.1):
+                                  max_force=0.1, death_rate=0.001):
     """Visualize the flocking simulation using the blueprint layout with triangles showing movement direction."""
-    # Create simulation with blueprint layout
     sim = FlockingDogParkSimulation(
         space_data=space_data,
         cohesion_factor=cohesion_factor,
         separation_factor=separation_factor,
         alignment_factor=alignment_factor,
-        visual_range=perception_radius
+        visual_range=perception_radius,
+        death_rate=death_rate
     )
-    
-    # Set arrival rate and max force
     sim.arrival_rate = arrival_rate
     sim.max_force = max_force
-    
-    # Add initial agents to ensure we have some at the start
-    for _ in range(5):
-        sim.add_agent()
+    sim.add_random_agents(50)
     
     # Set up the plot with new style
     plt.style.use('dark_background')
-    fig = plt.figure(figsize=(14, 10))
+    fig = plt.figure(figsize=(20, 10))
     
     # Create grid for main plot and sliders
     gs = plt.GridSpec(21, 1)  # 21 rows, 1 column (added one more for arrival rate slider)
@@ -371,19 +369,19 @@ def visualize_flocking_simulation(space_data, steps=1000, arrival_rate=0.1,
     ax.imshow(mask_img)
     
     # Draw the entry points
-    # Draw a line connecting the two boundary points to show the source area
-    if hasattr(sim, 'boundary_source_points') and len(sim.boundary_source_points) >= 2:
-        p1, p2 = sim.boundary_source_points
-        y1, x1 = p1
-        y2, x2 = p2
-        
-        # Draw a thick yellow line along the boundary segment
-        ax.plot([x1, x2], [y1, y2], color='#FFFF00', linestyle='-', linewidth=3)
-        
-        # Highlight the entry point
-        ax.scatter([sim.entry_x], [sim.entry_y], color='#FFFF00', s=100, marker='*')
+    if hasattr(sim, 'boundary_source_points') and len(sim.boundary_source_points) > 0:
+        if len(sim.boundary_source_points) == 2:
+            p1, p2 = sim.boundary_source_points
+            y1, x1 = p1
+            y2, x2 = p2
+            # Draw a thick yellow line along the boundary segment
+            ax.plot([x1, x2], [y1, y2], color='#FFFF00', linestyle='-', linewidth=3)
+            # Highlight the entry point
+            ax.scatter([sim.entry_x], [sim.entry_y], color='#FFFF00', s=100, marker='*')
+        else:
+            ys, xs = zip(*sim.boundary_source_points)
+            ax.scatter(xs, ys, color='#FFFF00', s=10, marker='|')
     else:
-        # Fallback: mark the entry point with a yellow star
         ax.scatter([sim.entry_x], [sim.entry_y], color='#FFFF00', s=100, marker='*')
     
     # Use a list to store artists that need to be cleaned up between frames
@@ -558,25 +556,26 @@ def visualize_flocking_simulation(space_data, steps=1000, arrival_rate=0.1,
     return sim
 
 
-def generate_flocking_heatmap(space_data, steps=1000, arrival_rate=0.1, 
+def generate_flocking_heatmap(space_data, steps=1000, arrival_rate=0.05, 
                              cohesion_factor=0.5, 
                              separation_factor=0.5, alignment_factor=0.5,
-                             perception_radius=10, max_force=1.0):
+                             perception_radius=10, max_force=1.0, death_rate=0.001):
     """Generate a heatmap of dog density for the flocking simulation using blueprint layout."""
-    
-    # Create simulation with blueprint layout
     sim = FlockingDogParkSimulation(
         space_data=space_data,
         cohesion_factor=cohesion_factor,
         separation_factor=separation_factor,
         alignment_factor=alignment_factor,
-        visual_range=perception_radius
+        visual_range=perception_radius,
+        death_rate=death_rate
     )
-    
-    # Set the arrival rate for the simulation
+    # --- Add: Load grey_obstacle_mask if present ---
+    if 'grey_obstacle_mask' in space_data:
+        sim.grey_obstacle_mask = space_data['grey_obstacle_mask']
+    # --- End add ---
     sim.arrival_rate = arrival_rate
-    # Set the max_force (not originally included in constructor)
     sim.max_force = max_force
+    sim.add_random_agents(50)
     
     # Initialize a density grid
     density_grid = np.zeros((sim.height, sim.width))
@@ -597,7 +596,7 @@ def generate_flocking_heatmap(space_data, steps=1000, arrival_rate=0.1,
     
     # Set up the plot with styling
     plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(14, 12))
+    fig, ax = plt.subplots(figsize=(20, 10))
     fig.patch.set_facecolor('#2A2A2A')
     ax.set_facecolor('#2A2A2A')
     
@@ -613,11 +612,21 @@ def generate_flocking_heatmap(space_data, steps=1000, arrival_rate=0.1,
     masked_density = np.ma.masked_array(density_grid, mask=~sim.traversable_mask)
     
     # Create a composite visualization
-    # First, show the original blueprint as background
-    ax.imshow(sim.original_rgb, alpha=0.7)
+    # First, show the original blueprint as background, but more faded
+    ax.imshow(sim.original_rgb, alpha=0.4)
     
-    # Then overlay the heatmap
-    heatmap = ax.imshow(masked_density, cmap='viridis', alpha=0.7, interpolation='gaussian')
+    # Then overlay the heatmap with higher contrast
+    norm = mcolors.PowerNorm(gamma=0.5)
+    heatmap = ax.imshow(masked_density, cmap='plasma', alpha=0.85, interpolation='gaussian', norm=norm)
+    
+    # --- Add: Overlay obstacles as in diffusion_simulation.py ---
+    if hasattr(sim, 'white_obstacle_mask') and np.any(sim.white_obstacle_mask):
+        white_y, white_x = np.where(sim.white_obstacle_mask)
+        ax.scatter(white_x, white_y, color='magenta', s=5, alpha=0.6)
+    if hasattr(sim, 'grey_obstacle_mask') and np.any(sim.grey_obstacle_mask):
+        grey_y, grey_x = np.where(sim.grey_obstacle_mask)
+        ax.scatter(grey_x, grey_y, color='blue', s=5, alpha=0.6)
+    # --- End add ---
     
     # Add a colorbar
     cbar = plt.colorbar(heatmap, ax=ax, pad=0.02)
@@ -625,18 +634,19 @@ def generate_flocking_heatmap(space_data, steps=1000, arrival_rate=0.1,
     cbar.ax.tick_params(colors='white')
     
     # Draw the entry points
-    if hasattr(sim, 'boundary_source_points') and len(sim.boundary_source_points) >= 2:
-        p1, p2 = sim.boundary_source_points
-        y1, x1 = p1
-        y2, x2 = p2
-        
-        # Draw a thick yellow line along the boundary segment
-        ax.plot([x1, x2], [y1, y2], color='#FFFF00', linestyle='-', linewidth=3)
-        
-        # Highlight the entry point
-        ax.scatter([sim.entry_x], [sim.entry_y], color='#FFFF00', s=100, marker='*')
+    if hasattr(sim, 'boundary_source_points') and len(sim.boundary_source_points) > 0:
+        if len(sim.boundary_source_points) == 2:
+            p1, p2 = sim.boundary_source_points
+            y1, x1 = p1
+            y2, x2 = p2
+            # Draw a thick yellow line along the boundary segment
+            ax.plot([x1, x2], [y1, y2], color='#FFFF00', linestyle='-', linewidth=3)
+            # Highlight the entry point
+            ax.scatter([sim.entry_x], [sim.entry_y], color='#FFFF00', s=100, marker='*')
+        else:
+            ys, xs = zip(*sim.boundary_source_points)
+            ax.scatter(xs, ys, color='#FFFF00', s=10, marker='|')
     else:
-        # Fallback: mark the entry point with a yellow star
         ax.scatter([sim.entry_x], [sim.entry_y], color='#FFFF00', s=100, marker='*')
     
     # Add title and labels
@@ -656,8 +666,79 @@ def generate_flocking_heatmap(space_data, steps=1000, arrival_rate=0.1,
                 color='white', fontsize=12)
     
     plt.tight_layout()
-    plt.savefig("flocking_heatmap.png", dpi=150)
+    # --- Save figure in 'figures' directory ---
+    os.makedirs('figures', exist_ok=True)
+    plt.savefig(os.path.join('figures', "flocking_heatmap.png"), dpi=150)
     plt.show()
+    
+    # --- Additional Plots ---
+    # Downsample traversable and obstacle masks
+    block_size = 5
+    coarse_traversable = block_reduce(sim.traversable_mask, block_size=(block_size, block_size), func=np.any)
+    coarse_white_obstacle = block_reduce(getattr(sim, 'white_obstacle_mask', np.zeros_like(sim.traversable_mask)), block_size=(block_size, block_size), func=np.any)
+    coarse_grey_obstacle = block_reduce(getattr(sim, 'grey_obstacle_mask', np.zeros_like(sim.traversable_mask)), block_size=(block_size, block_size), func=np.any)
+
+    # 1. Total Traveled Path Map (Binary, masked)
+    visited = density_grid > 0
+    coarse_visited = block_reduce(visited, block_size=(block_size, block_size), func=np.any)
+    coarse_visited_masked = np.ma.masked_where(~coarse_traversable, coarse_visited)
+    plt.figure(figsize=(20, 10))
+    # Show blueprint as background, aligned
+    plt.imshow(sim.original_rgb, alpha=0.4, extent=[0, sim.width, sim.height, 0], aspect='auto')
+    # Overlay coarse visited mask, aligned
+    plt.imshow(coarse_visited_masked, cmap='gray', interpolation='nearest', alpha=0.85,
+               extent=[0, sim.width, sim.height, 0], aspect='auto')
+    # Overlay obstacles, aligned
+    if np.any(coarse_white_obstacle):
+        plt.imshow(np.ma.masked_where(~coarse_white_obstacle, coarse_white_obstacle), cmap=mcolors.ListedColormap(['magenta']), alpha=0.5, interpolation='nearest', extent=[0, sim.width, sim.height, 0], aspect='auto')
+    if np.any(coarse_grey_obstacle):
+        plt.imshow(np.ma.masked_where(~coarse_grey_obstacle, coarse_grey_obstacle), cmap=mcolors.ListedColormap(['blue']), alpha=0.5, interpolation='nearest', extent=[0, sim.width, sim.height, 0], aspect='auto')
+    # Overlay obstacle points for clarity, scaled
+    if np.any(coarse_white_obstacle):
+        y, x = np.where(coarse_white_obstacle)
+        plt.scatter(x * block_size + block_size // 2, y * block_size + block_size // 2, color='magenta', s=10, alpha=0.7)
+    if np.any(coarse_grey_obstacle):
+        y, x = np.where(coarse_grey_obstacle)
+        plt.scatter(x * block_size + block_size // 2, y * block_size + block_size // 2, color='blue', s=10, alpha=0.7)
+    plt.title('Total Traveled Path (Visited Areas, Masked)')
+    plt.axis('off')
+    plt.tight_layout()
+    # --- Save figure in 'figures' directory ---
+    os.makedirs('figures', exist_ok=True)
+    plt.savefig(os.path.join('figures', "flocking_total_traveled_path.png"), dpi=150)
+    plt.show()
+    
+    # 2. Coarse-Grained, Normalized Heatmap (masked)
+    coarse_density = block_reduce(density_grid, block_size=(block_size, block_size), func=np.sum)
+    coarse_density_masked = np.ma.masked_where(~coarse_traversable, coarse_density)
+    norm = mcolors.PowerNorm(gamma=0.5)
+    plt.figure(figsize=(20, 10))
+    # Show blueprint as background, aligned
+    plt.imshow(sim.original_rgb, alpha=0.4, extent=[0, sim.width, sim.height, 0], aspect='auto')
+    # Overlay coarse density heatmap, aligned
+    plt.imshow(coarse_density_masked, cmap='plasma', norm=norm, interpolation='nearest', alpha=0.85,
+               extent=[0, sim.width, sim.height, 0], aspect='auto')
+    # Overlay obstacles, aligned
+    if np.any(coarse_white_obstacle):
+        plt.imshow(np.ma.masked_where(~coarse_white_obstacle, coarse_white_obstacle), cmap=mcolors.ListedColormap(['magenta']), alpha=0.5, interpolation='nearest', extent=[0, sim.width, sim.height, 0], aspect='auto')
+    if np.any(coarse_grey_obstacle):
+        plt.imshow(np.ma.masked_where(~coarse_grey_obstacle, coarse_grey_obstacle), cmap=mcolors.ListedColormap(['blue']), alpha=0.5, interpolation='nearest', extent=[0, sim.width, sim.height, 0], aspect='auto')
+    # Overlay obstacle points for clarity, scaled
+    if np.any(coarse_white_obstacle):
+        y, x = np.where(coarse_white_obstacle)
+        plt.scatter(x * block_size + block_size // 2, y * block_size + block_size // 2, color='magenta', s=10, alpha=0.7)
+    if np.any(coarse_grey_obstacle):
+        y, x = np.where(coarse_grey_obstacle)
+        plt.scatter(x * block_size + block_size // 2, y * block_size + block_size // 2, color='blue', s=10, alpha=0.7)
+    plt.title(f'Coarse-Grained Density Heatmap (block size {block_size}x{block_size}, Masked)')
+    plt.colorbar(label='Agent Density')
+    plt.axis('off')
+    plt.tight_layout()
+    # --- Save figure in 'figures' directory ---
+    os.makedirs('figures', exist_ok=True)
+    plt.savefig(os.path.join('figures', "flocking_coarse_grained_density_heatmap.png"), dpi=150)
+    plt.show()
+    # --- End Additional Plots ---
     
     return density_grid
 
@@ -667,11 +748,12 @@ if __name__ == "__main__":
     parser.add_argument('--layout', type=str, required=True, help='Path to the preprocessed space layout file (pickle)')
     parser.add_argument('--arrival_rate', type=float, default=0.1, help='Agent arrival rate (0-1)')
     parser.add_argument('--cohesion', type=float, default=0.5, help='Cohesion factor (0-1)')
-    parser.add_argument('--separation', type=float, default=0.5, help='Separation factor (0-1)')
+    parser.add_argument('--separation', type=float, default=0.55, help='Separation factor (0-1)')
     parser.add_argument('--alignment', type=float, default=0.5, help='Alignment factor (0-1)')
     parser.add_argument('--perception', type=int, default=20, help='Perception radius')
     parser.add_argument('--max_force', type=float, default=1.0, help='Maximum steering force')
-    parser.add_argument('--steps', type=int, default=1000, help='Number of simulation steps')
+    parser.add_argument('--steps', type=int, default=2000, help='Number of simulation steps')
+    parser.add_argument('--death_rate', type=float, default=0.001, help='Probability of agent death per step (0-1)')
     parser.add_argument('--heatmap', action='store_true', help='Generate heatmap instead of animation')
     
     args = parser.parse_args()
@@ -685,7 +767,8 @@ if __name__ == "__main__":
             separation_factor=args.separation,
             alignment_factor=args.alignment,
             perception_radius=args.perception,
-            max_force=args.max_force
+            max_force=args.max_force,
+            death_rate=args.death_rate
         )
     else:
         visualize_flocking_simulation(
@@ -696,5 +779,6 @@ if __name__ == "__main__":
             separation_factor=args.separation,
             alignment_factor=args.alignment,
             perception_radius=args.perception,
-            max_force=args.max_force
+            max_force=args.max_force,
+            death_rate=args.death_rate
         ) 

@@ -13,6 +13,8 @@ import sys
 import matplotlib.transforms
 import matplotlib.markers
 import pickle
+import matplotlib.widgets as mwidgets
+from scipy.ndimage import label
 
 class SpacePreprocessor:
     def __init__(self, image_path):
@@ -29,7 +31,7 @@ class SpacePreprocessor:
         self.boundary_source_points = None
 
     def process_image(self):
-        """Load and process the blueprint image to create traversable and obstacle masks based on red boundary and white obstacles."""
+        """Load and process the blueprint image to create traversable and obstacle masks based on red boundary, white, and grey obstacles."""
         self.original_image = cv2.imread(self.image_path)
         if self.original_image is None:
             raise ValueError(f"Could not load image at {self.image_path}")
@@ -58,38 +60,105 @@ class SpacePreprocessor:
         white_mask = cv2.inRange(self.original_rgb, lower_white, upper_white)
         white_obstacle_mask = (white_mask > 0) & self.traversable_mask
         self.white_obstacle_mask = white_obstacle_mask
-        self.obstacle_mask = ~self.traversable_mask | self.white_obstacle_mask
+        # --- Grey obstacle detection ---
+        rgb = self.original_rgb
+        min_rgb = np.min(rgb, axis=2)
+        max_rgb = np.max(rgb, axis=2)
+        mean_rgb = np.mean(rgb, axis=2)
+        grey_mask = (
+            (min_rgb >= 120) & (max_rgb <= 200) &
+            ((max_rgb - min_rgb) < 20) & self.traversable_mask
+        )
+        self.grey_obstacle_mask = grey_mask
+        # ---
+        self.obstacle_mask = ~self.traversable_mask | self.white_obstacle_mask | self.grey_obstacle_mask
+        # Filter white obstacles by area
         white_obstacle_mask_uint8 = white_obstacle_mask.astype(np.uint8) * 255
         contours, _ = cv2.findContours(white_obstacle_mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        min_area = 500
+        min_area = 100
         filtered_white_obstacle_mask = np.zeros_like(white_obstacle_mask, dtype=np.uint8)
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area >= min_area:
                 cv2.drawContours(filtered_white_obstacle_mask, [cnt], -1, 1, -1)
         self.white_obstacle_mask = filtered_white_obstacle_mask.astype(bool)
-        self.obstacle_mask = ~self.traversable_mask | self.white_obstacle_mask
+        # Filter grey obstacles by area
+        grey_obstacle_mask_uint8 = grey_mask.astype(np.uint8) * 255
+        contours, _ = cv2.findContours(grey_obstacle_mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        min_area = 100
+        filtered_grey_obstacle_mask = np.zeros_like(grey_mask, dtype=np.uint8)
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area >= min_area:
+                cv2.drawContours(filtered_grey_obstacle_mask, [cnt], -1, 1, -1)
+        self.grey_obstacle_mask = filtered_grey_obstacle_mask.astype(bool)
+        self.obstacle_mask = ~self.traversable_mask | self.white_obstacle_mask | self.grey_obstacle_mask
         print(f"Image processed: {self.width}x{self.height}")
         print(f"Traversable area: {np.sum(self.traversable_mask)} pixels")
         print(f"White obstacles detected: {np.sum(self.white_obstacle_mask)} pixels")
+        print(f"Grey obstacles detected: {np.sum(self.grey_obstacle_mask)} pixels")
 
     def visualize_and_approve_obstacles(self):
         overlay = self.original_rgb.copy()
-        overlay[self.white_obstacle_mask] = [255, 0, 255]
-        plt.figure(figsize=(14, 10))
-        ax = plt.gca()
-        ax.imshow(overlay, origin='upper')
+        # Function to update the overlay
+        def update_overlay():
+            overlay[:] = self.original_rgb
+            overlay[self.white_obstacle_mask] = [255, 0, 255]  # magenta for white obstacles
+            overlay[self.grey_obstacle_mask] = [100, 100, 255]  # blue for grey obstacles
+            ax.imshow(overlay, origin='upper')
+            fig.canvas.draw_idle()
+        
+        fig, ax = plt.subplots(figsize=(14, 10))
+        update_overlay()
         ax.set_aspect('equal')
         ax.set_xlim(0, self.width)
         ax.set_ylim(self.height, 0)
         ax.set_xticks([])
         ax.set_yticks([])
-        plt.title('Detected Obstacles (magenta) over Blueprint')
+        plt.title('Detected Obstacles (magenta=white, blue=grey) over Blueprint\nClick magenta or blue to remove. Click "Done" when finished.', fontsize=14)
         plt.tight_layout()
-        plt.show()
-        resp = input("Do you approve the detected obstacles? (y/n): ")
+
+        done = {'value': False}
+
+        # Add a Done button
+        button_ax = fig.add_axes([0.85, 0.01, 0.1, 0.05])
+        done_button = mwidgets.Button(button_ax, 'Done', color='#cccccc', hovercolor='#aaaaaa')
+        def on_done(event):
+            done['value'] = True
+            plt.close(fig)
+        done_button.on_clicked(on_done)
+
+        def on_click(event):
+            if event.inaxes != ax:
+                return
+            x, y = int(event.xdata + 0.5), int(event.ydata + 0.5)
+            if 0 <= x < self.width and 0 <= y < self.height:
+                # Remove white obstacle region
+                if self.white_obstacle_mask[y, x]:
+                    labeled, num = label(self.white_obstacle_mask)
+                    region_label = labeled[y, x]
+                    if region_label > 0:
+                        self.white_obstacle_mask[labeled == region_label] = False
+                        self.obstacle_mask = ~self.traversable_mask | self.white_obstacle_mask | self.grey_obstacle_mask
+                        update_overlay()
+                # Remove grey obstacle region
+                elif self.grey_obstacle_mask[y, x]:
+                    labeled, num = label(self.grey_obstacle_mask)
+                    region_label = labeled[y, x]
+                    if region_label > 0:
+                        self.grey_obstacle_mask[labeled == region_label] = False
+                        self.obstacle_mask = ~self.traversable_mask | self.white_obstacle_mask | self.grey_obstacle_mask
+                        update_overlay()
+        cid = fig.canvas.mpl_connect('button_press_event', on_click)
+
+        # Wait for user to click Done
+        while not done['value']:
+            plt.pause(0.1)
+        fig.canvas.mpl_disconnect(cid)
+        # Final approval prompt
+        resp = input("Do you want to save the processed space? (y/n): ")
         if resp.strip().lower() != 'y':
-            print("Obstacle detection not approved. Please adjust detection logic or blueprint.")
+            print("Space not saved. Exiting.")
             sys.exit(1)
 
     def set_entry_point(self, user_points=None):

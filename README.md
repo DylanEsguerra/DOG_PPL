@@ -1,255 +1,99 @@
-# Dog Park Simulation with JSON Layout
+# Dog Park Layout Simulator
 
-This project implements a flocking behavior simulation for dogs in a custom-defined park layout. It uses the Boids algorithm to simulate realistic social behavior of dogs.
+## Project Overview
 
-## New JSON Layout System
+This project aims to understand and optimize dog park space utilization through computational modeling of foot traffic patterns. By simulating how dogs and their owners might navigate through a proposed dog park layout, we can identify potential congestion points, underutilized areas, and optimize the placement of features and obstacles.
 
-The new JSON-based layout system allows for precise definition of:
-- Custom park boundaries of any shape
-- Multiple entry points for dogs
-- Various obstacles (rectangles, circles, polygons)
-- Special zones for analysis
+## Simulation Methods
 
-### How to Run with a JSON Layout
+The project implements two complementary simulation approaches to model movement and space utilization:
+
+### 1. Flocking Simulation (BOIDS)
+
+The flocking simulation utilizes Craig Reynolds' BOIDS algorithm to model the natural group behavior of dogs in a social setting. This agent-based approach simulates individual dogs moving through the space following three primary rules:
+
+- **Separation**: Dogs avoid crowding and colliding with each other
+- **Alignment**: Dogs tend to move in the same direction as nearby dogs
+- **Cohesion**: Dogs are attracted to the center of mass of nearby dogs
+
+Additional rules handle obstacle avoidance and boundary constraints. This simulation provides a realistic representation of social animal movement patterns and emergent group behaviors.
+
+### 2. Diffusion-Convection Simulation
+
+The diffusion-convection simulation takes a different approach by treating foot traffic as a fluid-like phenomenon modeling the transport of solutes in a fluid:
+
+- **Diffusion**: Models the natural spreading of movement in all directions
+- **Convection**: Represents directed movement trends in specific directions
+
+This physics-based approach treats dogs and owners as a concentration that flows through the park, spreading around obstacles and settling into a steady-state distribution over time. The simulation provides insights into overall traffic density and identifies areas of high and low utilization.
+
+## Layout Extraction
+
+The simulator works with blueprint images of proposed dog park layouts:
+
+1. **Boundary Detection**: Red boundaries in the blueprint define the overall park perimeter
+2. **Obstacle Identification**: 
+   - White obstacles (structures, benches, etc.) are detected based on color thresholds
+   - Grey obstacles (trees, posts, etc.) are identified using separate color processing
+3. **Traversable Space**: Areas inside the boundaries that are not obstacles are identified as traversable space
+4. **Entry Points**: The system detects park entrances for realistic simulation of arrival patterns
+
+The `Space_Preprocessor` module handles this conversion from blueprints to simulation-ready data structures, with an interactive approval process allowing manual correction of detected features.
+
+## Key Features
+
+- Interactive visualization with parameter adjustment sliders
+- Heatmap generation for analyzing space utilization
+- Adjustable simulation parameters (diffusion coefficient, convection direction, cohesion/separation/alignment factors)
+- Automatic obstacle and boundary detection from blueprints
+- Support for downsampling to speed up development iterations
+
+## Usage
+
+### Preprocessing a Blueprint
 
 ```bash
-python src/json_layout.py layouts/rooftop_garden.json
+python src/Space_Preprocessor.py path/to/blueprint.png
 ```
 
-With options:
+Obstacles can be deselected by clicking on them. This is often required as the object detection has some errors. 
+
+Select Done when the space looks correct and respond yes to the following terminal prompt. 
+
+### Running Simulations
+
+For the diffusion-convection simulation:
 ```bash
-python src/json_layout.py layouts/rooftop_garden.json --width 1200 --arrival_rate 0.2 --temperature 1.0 --cohesion 0.6 --separation 0.4 --perception 15 --steps 2000 --heatmap
+python src/diffusion_simulation.py --layout layouts/processed_space.pkl --diffusion 1.0 --convection_x 0.5 --convection_y -0.1 --dt 0.15 --steps 2000 --heatmap
 ```
 
-## Blueprint to JSON Conversion
-
-To create a JSON layout from a blueprint image:
-
+For the flocking (BOIDS) simulation:
 ```bash
-python src/blueprint_to_json.py path/to/blueprint.jpg --name "My Layout" --output layouts/my_layout.json
+python src/flocking_simulation.py --layout layouts/processed_space.pkl --steps 2000 --heatmap
 ```
 
-This tool extracts the boundary from a blueprint image (looking for red outlines by default) and creates a basic JSON layout file.
+## Analysis
 
-Options:
-- `--color` - Specify the color to detect (red, blue, green)
-- `--no-preview` - Skip showing the preview of the extracted boundary
-- `--output` - Specify the output JSON file path
-- `--name` - Set the name of the layout
+The generated heatmaps provide visual insights into:
+- High-traffic areas that may experience congestion
+- Underutilized spaces that might benefit from feature placement
+- Flow patterns around obstacles
+- Impact of entry points on overall space utilization
 
-## Interactive Layout Editor
+By comparing results from both simulation methods, designers can gain a more comprehensive understanding of how the proposed space might function in real-world scenarios.
 
-After creating a basic layout from a blueprint, you can use the layout editor to add zones, obstacles, and entry points:
+# Example Results
 
-```bash
-python src/layout_editor.py layouts/my_layout.json --background path/to/blueprint.jpg
-```
+Below are example heatmaps generated by the two simulation methods, visualizing space utilization in a sample dog park layout:
 
-The editor provides a visual interface for:
-- Adding zones (for analysis)
-- Adding obstacles (rectangles, circles, polygons)
-- Adding entry points
-- Saving the completed layout
+## Diffusion-Convection Heatmap
 
-### Usage:
-1. Click the appropriate button (Add Zone, Add Obstacle, Add Entry)
-2. Select a shape type (Rectangle, Circle, Polygon)
-3. Click on the canvas to place points
-4. Press Enter to complete the shape
-5. Click Save to save your layout
+![Diffusion-Convection Heatmap](figures/diffusion_heatmap.png)
 
-### JSON Layout Format
+*Figure: Steady-state concentration heatmap from the diffusion-convection simulation. High values (yellow/white) indicate areas with the most expected foot traffic, while dark regions are less utilized. Obstacles and boundaries are respected by the simulated flow.*
 
-The layout file uses the following format:
+## Flocking (BOIDS) Heatmap
 
-```json
-{
-    "name": "Layout Name",
-    "width": 1000,
-    "height": 1000,
-    "boundary": [
-        [x1, y1],
-        [x2, y2],
-        ...
-    ],
-    "entry_points": [
-        {
-            "name": "Entry Point Name",
-            "position": [x, y],
-            "properties": {
-                "type": "main"
-            }
-        }
-    ],
-    "obstacles": [
-        {
-            "name": "Obstacle Name",
-            "shape": "rectangle",
-            "position": [x, y],
-            "width": w,
-            "height": h,
-            "properties": {
-                "type": "obstacle_type"
-            }
-        },
-        {
-            "name": "Circle Obstacle",
-            "shape": "circle",
-            "position": [x, y],
-            "radius": r,
-            "properties": {
-                "type": "circle_type"
-            }
-        },
-        {
-            "name": "Polygon Obstacle",
-            "shape": "polygon",
-            "points": [
-                [x1, y1],
-                [x2, y2],
-                ...
-            ],
-            "properties": {
-                "type": "polygon_type"
-            }
-        }
-    ],
-    "zones": [
-        {
-            "id": "zone_id",
-            "name": "Zone Name",
-            "points": [
-                [x1, y1],
-                [x2, y2],
-                ...
-            ],
-            "properties": {
-                "type": "zone_type",
-                "label": "Display Label",
-                "color": "#HEX_COLOR",
-                "alpha": 0.3
-            }
-        }
-    ]
-}
-```
+![Flocking Heatmap](figures/flocking_heatmap.png)
 
-### Layout Definition Details
-
-#### Boundary
-The `boundary` defines the outer shape of the park as a polygon. All coordinates should be in the range [0, width] and [0, height].
-
-#### Entry Points
-`entry_points` define where dogs enter the simulation. You can specify multiple entry points, and dogs will randomly choose one when they arrive.
-
-#### Obstacles
-`obstacles` can be rectangles, circles, or polygons. Dogs will avoid these areas. Each obstacle type has specific properties:
-- Rectangle: `position`, `width`, `height`
-- Circle: `position`, `radius`
-- Polygon: `points`
-
-#### Zones
-`zones` are special areas used for analysis. They don't affect movement but can track how many dogs are in each zone during the simulation.
-
-## Workflow for Creating a Custom Layout
-
-1. **Extract boundary from blueprint**: 
-   ```bash
-   python src/blueprint_to_json.py blueprint.jpg --output layouts/initial_layout.json
-   ```
-
-2. **Edit layout with visual tool**:
-   ```bash
-   python src/layout_editor.py layouts/initial_layout.json --background blueprint.jpg
-   ```
-
-3. **Run simulation**:
-   ```bash
-   python src/json_layout.py layouts/initial_layout.json
-   ```
-
-4. **Generate heatmap**:
-   ```bash
-   python src/json_layout.py layouts/initial_layout.json --heatmap
-   ```
-
-## Example Layouts
-
-The project includes sample layouts in the `layouts` directory:
-- `rooftop_garden.json`: A rooftop garden with multiple zones and obstacles
-
-## Extending the System
-
-To add new features:
-1. Define new properties in the JSON format
-2. Extend the JSONLayoutSimulation class to handle the new properties
-3. Update visualization functions to display the new elements
-
-## Additional Features
-
-- **Analytics**: Track dog movement patterns within different zones
-- **Multiple Species**: Add different types of agents with varying behaviors
-- **Time-based Events**: Schedule events like temporary obstacles or changing behavior parameters
-
-## Features
-- 2D simulation of dog movement in a park space
-- Random walker movement model for dogs
-- Flocking behavior for more realistic movement
-- Custom layout support using blueprint images
-- Configurable arrival rate and movement temperature
-- Visualization of dog movement and density
-
-## Setup
-1. Activate the virtual environment:
-   ```
-   source venv/bin/activate
-   ```
-2. Install dependencies (if not already installed):
-   ```
-   ./run.sh install
-   ```
-3. Run the simulation:
-   ```
-   ./run.sh simulation
-   ```
-
-## Simulation Types
-
-### Basic Random Walker
-```
-./run.sh simulation [options]
-./run.sh heatmap [options]
-```
-
-### Flocking Behavior
-```
-./run.sh flocking [options]
-./run.sh flocking-heatmap [options]
-```
-
-### Custom Layout
-To use a custom park layout from a blueprint:
-1. Place your blueprint image in the `data/` directory
-2. The red boundary line in the image defines the park space
-3. Run the simulation with:
-```
-./run.sh custom data/your_blueprint.jpg [options]
-./run.sh custom-heatmap data/your_blueprint.jpg [options]
-```
-
-## Parameters
-- `--width`, `--height`: Dimensions of the simulation space
-- `--arrival_rate`: Rate at which dogs arrive (0-1)
-- `--temperature`: Controls randomness of movement (0-5)
-- `--steps`: Number of simulation steps
-
-### Flocking Parameters
-- `--cohesion`: How much dogs are attracted to each other (0-1)
-- `--separation`: How much dogs avoid each other (0-1)
-- `--perception`: How far dogs can sense other dogs
-
-### Custom Layout Parameters
-- `--entry_x`, `--entry_y`: Entry point coordinates (0-1)
-
-## Future Plans
-- Web app with interactive sliders for parameters 
+*Figure: Agent density heatmap from the flocking (BOIDS) simulation. Brighter areas show where simulated dogs spend the most time, revealing emergent group behaviors and congestion points. Obstacles and entry points are clearly visible in the resulting pattern.*
