@@ -106,6 +106,40 @@ The primary heatmap can be a bit faint making understanding the foot traffic dif
 
 *Figure: Coarse-grained, normalized density heatmap from the flocking simulation (proposed layout).* 
 
+## Results Interpretation
+
+The following interpretations can help guide design decisions based on the simulation outputs:
+
+### Diffusion-Convection Heatmap
+- **What it shows:**
+  - Visualizes the steady-state "foot traffic" density across the park, treating movement like a fluid.
+- **How to interpret:**
+  - **Bright (yellow/white) areas** indicate regions with the highest expected traffic, such as main paths or areas near entrances.
+  - **Dark areas** are underutilized, possibly due to obstacles or distance from entry points.
+  - **Obstacles and boundaries** are respected by the simulated flow, creating "shadows" or low-density regions behind them.
+- **Design implications:**
+  - High-density areas may need reinforcement, wider paths, or additional features to manage congestion.
+  - Underutilized areas could be enhanced with attractions or amenities to balance usage.
+
+### Flocking (BOIDS) Heatmap
+- **What it shows:**
+  - Displays where simulated dogs (agents) spend the most time, based on social animal movement rules.
+- **How to interpret:**
+  - **Bright regions** show emergent gathering points or preferred paths.
+  - **Congestion points** may appear at bottlenecks, narrow passages, or near popular features.
+  - **Obstacles** create natural flow diversions, which can be seen as gaps or low-density zones.
+- **Design implications:**
+  - Identify and address potential congestion points.
+  - Use natural gathering areas for placing water stations, benches, or shade.
+  - Ensure that obstacles do not create dead-ends or inaccessible regions.
+
+### Additional Flocking Visualizations
+- **Total Traveled Path Map:**
+  - Shows all areas visited by agents, highlighting which parts of the park are never visited
+- **Coarse-Grained Density Heatmap:**
+  - Makes it easier to spot broad patterns and under/over-utilized zones, especially in large or complex layouts.
+
+By iteratively adjusting the park layout and re-running the simulations, designers can optimize for both efficient use and a pleasant experience for dogs and their owners.
 
 ## Usage
 
