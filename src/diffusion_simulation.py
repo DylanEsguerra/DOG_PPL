@@ -6,6 +6,7 @@ import argparse
 import os
 import pickle
 from matplotlib.widgets import Slider
+import cv2
 
 
 def load_preprocessed_space(layout_path):
@@ -45,25 +46,46 @@ class DiffusionSimulation:
             p1, p2 = self.boundary_source_points
             y1, x1 = p1
             y2, x2 = p2
-            # Get all points along the line segment
-            line_points = set(self.bresenham_line(x1, y1, x2, y2))
-            # For every traversable pixel, check if it is adjacent to a red boundary pixel that is on the line segment
+            
+            # Instead of using a straight line, find all red boundary pixels 
+            # We will check if they're part of the boundary segment later
+            boundary_pixels = []
+            for y in range(self.height):
+                for x in range(self.width):
+                    if self.red_boundary_mask[y, x]:
+                        boundary_pixels.append((y, x))
+            
+            # Find the boundary pixels that are on the segment between p1 and p2
+            # We'll filter boundary pixels based on being inside the bounding box of p1 and p2
+            # (with some tolerance to account for non-straight boundaries)
+            min_y = min(y1, y2) - 10
+            max_y = max(y1, y2) + 10
+            min_x = min(x1, x2) - 10
+            max_x = max(x1, x2) + 10
+            
+            segment_boundary_pixels = []
+            for y, x in boundary_pixels:
+                if min_y <= y <= max_y and min_x <= x <= max_x:
+                    segment_boundary_pixels.append((y, x))
+            
+            # For every traversable pixel, check if it is adjacent to a red boundary pixel on the segment
             for y in range(self.height):
                 for x in range(self.width):
                     if self.traversable_mask[y, x] and not self.red_boundary_mask[y, x]:
-                        # Check 8-neighborhood for a red boundary pixel that is on the line segment
+                        # Check 8-neighborhood for a red boundary pixel on the segment
                         for dy in [-1, 0, 1]:
                             for dx in [-1, 0, 1]:
                                 if dy == 0 and dx == 0:
                                     continue
                                 ny, nx = y + dy, x + dx
                                 if (0 <= ny < self.height and 0 <= nx < self.width and
-                                    self.red_boundary_mask[ny, nx] and (nx, ny) in line_points):
+                                    self.red_boundary_mask[ny, nx] and (ny, nx) in segment_boundary_pixels):
                                     self.source_points.append((y, x))
                                     break
                             else:
                                 continue
                             break
+        
         # Fallback: if no source points found, use traversable pixels near entry_point
         if not self.source_points:
             y_entry, x_entry = self.entry_point
@@ -73,11 +95,14 @@ class DiffusionSimulation:
                     if (0 <= ny < self.height and 0 <= nx < self.width and
                         self.traversable_mask[ny, nx] and not self.red_boundary_mask[ny, nx]):
                         self.source_points.append((ny, nx))
+        
         # Make the list of source points unique
         self.source_points = list(set(self.source_points))
+        
         # Set initial concentration for source points
         for y, x in self.source_points:
             self.concentration[y, x] = 1.0
+            
         # Debug print
         print(f"[DEBUG] Number of source points: {len(self.source_points)}")
         print(f"[DEBUG] Source points: {self.source_points[:10]}{'...' if len(self.source_points) > 10 else ''}")
@@ -432,6 +457,25 @@ def generate_diffusion_heatmap(space_data, steps=1000, diffusion_coeff=0.5,
     return sim.concentration
 
 
+def downsample_space_data(space_data, scale=0.25):
+    """Downsample all relevant arrays in space_data by the given scale."""
+    def resize_mask(mask):
+        return cv2.resize(mask.astype(np.uint8), (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST).astype(bool)
+    def resize_img(img):
+        return cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+    downsampled = {}
+    for key in ['traversable_mask', 'obstacle_mask', 'white_obstacle_mask', 'red_boundary_mask']:
+        downsampled[key] = resize_mask(space_data[key])
+    downsampled['original_rgb'] = resize_img(space_data['original_rgb'])
+    downsampled['height'], downsampled['width'] = downsampled['traversable_mask'].shape
+    # Scale entry and boundary points
+    downsampled['entry_point'] = tuple(int(round(x * scale)) for x in space_data['entry_point'])
+    downsampled['boundary_source_points'] = [
+        tuple(int(round(x * scale)) for x in pt) for pt in space_data['boundary_source_points']
+    ]
+    return downsampled
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run the diffusion simulation')
     parser.add_argument('--layout', type=str, required=True, help='Path to the preprocessed space layout file (pickle)')
@@ -441,10 +485,12 @@ if __name__ == "__main__":
     parser.add_argument('--dt', type=float, default=0.1, help='Time step')
     parser.add_argument('--steps', type=int, default=500, help='Number of simulation steps')
     parser.add_argument('--heatmap', action='store_true', help='Generate heatmap instead of animation')
-    
+    parser.add_argument('--downsample', type=float, default=None, help='Downsample scale for development (e.g. 0.25)')
     args = parser.parse_args()
     space_data = load_preprocessed_space(args.layout)
-    
+    if args.downsample is not None:
+        print(f"[INFO] Downsampling space data by scale {args.downsample}")
+        space_data = downsample_space_data(space_data, scale=args.downsample)
     if args.heatmap:
         generate_diffusion_heatmap(
             space_data=space_data,
