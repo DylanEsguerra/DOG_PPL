@@ -25,5 +25,5 @@ env/
 .vscode/
 
 # Images and outputs (optional, if you want to ignore generated images)
-*.png
-*.mp4 
+#*.png
+#*.mp4 
