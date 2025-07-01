@@ -24,7 +24,8 @@ def load_preprocessed_space(layout_path):
 
 class FlockingDogParkSimulation:
     def __init__(self, space_data, cohesion_factor=0.5, 
-                 separation_factor=0.5, alignment_factor=0.5, visual_range=20, death_rate=0.001):
+                 separation_factor=0.5, alignment_factor=0.5, visual_range=20, 
+                 overcrowding_threshold=10):
         """Initialize the flocking dog park simulation with preprocessed space data."""
         self.cohesion_factor = cohesion_factor
         self.separation_factor = separation_factor
@@ -34,7 +35,8 @@ class FlockingDogParkSimulation:
         self.min_speed = 0.5
         self.max_force = 0.1
         self.arrival_rate = 0.05
-        self.death_rate = death_rate
+        self.overcrowding_threshold = overcrowding_threshold
+        
         # Load preprocessed data
         self.traversable_mask = space_data['traversable_mask']
         self.obstacle_mask = space_data['obstacle_mask']
@@ -45,6 +47,7 @@ class FlockingDogParkSimulation:
         self.entry_point = space_data['entry_point']
         self.boundary_source_points = space_data['boundary_source_points']
         self.original_rgb = space_data['original_rgb']
+        
         # Handle entry_point=None by picking a random boundary source point
         if self.entry_point is None and self.boundary_source_points:
             self.entry_y, self.entry_x = random.choice(self.boundary_source_points)
@@ -52,7 +55,14 @@ class FlockingDogParkSimulation:
             self.entry_y, self.entry_x = self.entry_point
         else:
             raise ValueError("No entry point or boundary source points defined in layout.")
+        
         self.agents = []
+        
+        # Overcrowding tracking
+        self.agent_overcrowding_duration = {}  # agent_id -> consecutive steps overcrowded
+        self.agent_ids = 0  # Counter for unique agent IDs
+        self.overcrowding_history = []  # Store metrics over time
+        self.step_count = 0
     
     def add_agent(self):
         """Add a new agent at the entry point or random boundary source point."""
@@ -64,7 +74,14 @@ class FlockingDogParkSimulation:
         speed = random.uniform(self.min_speed, self.max_speed)
         vx = np.cos(angle) * speed
         vy = np.sin(angle) * speed
-        self.agents.append([entry_x, entry_y, vx, vy])
+        
+        # Agent format: [x, y, vx, vy, agent_id]
+        agent_id = self.agent_ids
+        self.agent_ids += 1
+        self.agents.append([entry_x, entry_y, vx, vy, agent_id])
+        
+        # Initialize overcrowding tracking for this agent
+        self.agent_overcrowding_duration[agent_id] = 0
     
     def apply_separation(self, agent_index, nearby_agents):
         """Calculate separation force to avoid other agents using vectorized operations."""
@@ -269,8 +286,15 @@ class FlockingDogParkSimulation:
         if random.random() < self.arrival_rate and len(self.agents) < 200:
             self.add_agent()
         self.move_agents()
-        # Remove agents with probability death_rate
-        self.agents = [agent for agent in self.agents if random.random() > self.death_rate]
+        
+        # Update overcrowding tracking
+        self.update_overcrowding_duration()
+        
+        # Store overcrowding metrics for this step
+        metrics = self.calculate_overcrowding_metrics()
+        metrics['step'] = self.step_count
+        self.overcrowding_history.append(metrics)
+        self.step_count += 1
     
     def get_agent_positions(self):
         """Return the positions of all agents."""
@@ -280,6 +304,15 @@ class FlockingDogParkSimulation:
         """Return numpy array of agent velocities"""
         velocities = np.array([agent[2:4] for agent in self.agents])
         return velocities
+    
+    def get_overcrowded_agents(self):
+        """Return positions of agents that are currently overcrowded."""
+        overcrowded_positions = []
+        for i in range(len(self.agents)):
+            nearby = self.find_nearby_agents(i)
+            if len(nearby) > self.overcrowding_threshold:
+                overcrowded_positions.append([self.agents[i][0], self.agents[i][1]])
+        return np.array(overcrowded_positions)
     
     def add_random_agents(self, n):
         """Add n agents at random valid locations with random velocity (not in obstacles or boundaries)."""
@@ -293,13 +326,106 @@ class FlockingDogParkSimulation:
             speed = random.uniform(self.min_speed, self.max_speed)
             vx = np.cos(angle) * speed
             vy = np.sin(angle) * speed
-            self.agents.append([x, y, vx, vy])
+            # Agent format: [x, y, vx, vy, agent_id]
+            agent_id = self.agent_ids
+            self.agent_ids += 1
+            self.agents.append([x, y, vx, vy, agent_id])
+            # Initialize overcrowding tracking for this agent
+            self.agent_overcrowding_duration[agent_id] = 0
+
+    def calculate_overcrowding_metrics(self):
+        """Calculate various overcrowding metrics for current state."""
+        if not self.agents:
+            return {
+                'overcrowding_percentage': 0,
+                'average_neighbors': 0,
+                'max_neighbors': 0,
+                'overcrowded_count': 0,
+                'total_agents': 0,
+                'agents_with_sustained_overcrowding': 0,
+                'average_overcrowding_duration': 0,
+                'max_overcrowding_duration': 0
+            }
+        
+        neighbor_counts = []
+        overcrowded_agents = 0
+        sustained_overcrowded = 0
+        
+        for i in range(len(self.agents)):
+            nearby = self.find_nearby_agents(i)
+            neighbor_count = len(nearby)
+            neighbor_counts.append(neighbor_count)
+            
+            agent_id = self.agents[i][4]  # Get agent ID
+            
+            if neighbor_count > self.overcrowding_threshold:
+                overcrowded_agents += 1
+                # Check if this agent has been overcrowded for multiple steps
+                if self.agent_overcrowding_duration[agent_id] > 5:  # 5+ consecutive steps
+                    sustained_overcrowded += 1
+        
+        # Calculate duration statistics
+        durations = list(self.agent_overcrowding_duration.values())
+        avg_duration = np.mean(durations) if durations else 0
+        max_duration = max(durations) if durations else 0
+        
+        return {
+            'overcrowding_percentage': (overcrowded_agents / len(self.agents)) * 100,
+            'average_neighbors': np.mean(neighbor_counts),
+            'max_neighbors': max(neighbor_counts) if neighbor_counts else 0,
+            'overcrowded_count': overcrowded_agents,
+            'total_agents': len(self.agents),
+            'agents_with_sustained_overcrowding': sustained_overcrowded,
+            'average_overcrowding_duration': avg_duration,
+            'max_overcrowding_duration': max_duration
+        }
+    
+    def update_overcrowding_duration(self):
+        """Update overcrowding duration for each agent."""
+        for i in range(len(self.agents)):
+            agent_id = self.agents[i][4]
+            nearby = self.find_nearby_agents(i)
+            neighbor_count = len(nearby)
+            
+            if neighbor_count > self.overcrowding_threshold:
+                # Agent is overcrowded, increment duration
+                self.agent_overcrowding_duration[agent_id] += 1
+            else:
+                # Agent is not overcrowded, reset duration
+                self.agent_overcrowding_duration[agent_id] = 0
+    
+    def get_overcrowding_statistics(self):
+        """Get comprehensive overcrowding statistics over time."""
+        if not self.overcrowding_history:
+            return {}
+        
+        history = self.overcrowding_history
+        
+        # Calculate statistics over the entire simulation
+        avg_overcrowding_pct = np.mean([h['overcrowding_percentage'] for h in history])
+        max_overcrowding_pct = max([h['overcrowding_percentage'] for h in history])
+        avg_neighbors = np.mean([h['average_neighbors'] for h in history])
+        max_neighbors_ever = max([h['max_neighbors'] for h in history])
+        
+        return {
+            'simulation_steps': len(history),
+            'average_overcrowding_percentage': avg_overcrowding_pct,
+            'peak_overcrowding_percentage': max_overcrowding_pct,
+            'average_neighbors_over_time': avg_neighbors,
+            'maximum_neighbors_ever': max_neighbors_ever,
+            'final_metrics': history[-1] if history else {}
+        }
+    
+    def is_system_overcrowded(self, threshold_percentage=20):
+        """Check if the system is considered overcrowded based on current metrics."""
+        metrics = self.calculate_overcrowding_metrics()
+        return metrics['overcrowding_percentage'] > threshold_percentage
 
 
 def visualize_flocking_simulation(space_data, steps=1000, arrival_rate=0.05, 
                                   cohesion_factor=0.5, separation_factor=0.5, 
                                   alignment_factor=0.5, perception_radius=20,
-                                  max_force=0.1, death_rate=0.001):
+                                  max_force=0.1, overcrowding_threshold=10):
     """Visualize the flocking simulation using the blueprint layout with triangles showing movement direction."""
     sim = FlockingDogParkSimulation(
         space_data=space_data,
@@ -307,7 +433,7 @@ def visualize_flocking_simulation(space_data, steps=1000, arrival_rate=0.05,
         separation_factor=separation_factor,
         alignment_factor=alignment_factor,
         visual_range=perception_radius,
-        death_rate=death_rate
+        overcrowding_threshold=overcrowding_threshold
     )
     sim.arrival_rate = arrival_rate
     sim.max_force = max_force
@@ -424,13 +550,27 @@ def visualize_flocking_simulation(space_data, steps=1000, arrival_rate=0.05,
             angles = np.arctan2(velocities[:, 1], velocities[:, 0])
             angles_deg = np.degrees(angles)
             
-            # Create triangles with appropriate rotations
+            # Get overcrowded agent positions
+            overcrowded_positions = sim.get_overcrowded_agents()
+            overcrowded_set = set()
+            if len(overcrowded_positions) > 0:
+                for opos in overcrowded_positions:
+                    # Find which agents are overcrowded by matching positions
+                    for i, pos in enumerate(positions):
+                        if np.allclose(pos, opos, atol=0.1):
+                            overcrowded_set.add(i)
+            
+            # Create triangles with appropriate rotations and colors
             for i, (x, y, angle) in enumerate(zip(positions[:, 0], positions[:, 1], angles_deg)):
+                # Color overcrowded agents red, others white
+                color = 'red' if i in overcrowded_set else 'white'
+                alpha = 0.9 if i in overcrowded_set else 0.7
+                
                 # Create a triangle pointing in direction of movement
                 triangle = patches.RegularPolygon(
                     (x, y), 3, radius=5, 
                     orientation=np.radians(angle-90),  # -90 to make it point forward
-                    color='white', alpha=0.7
+                    color=color, alpha=alpha
                 )
                 ax.add_patch(triangle)
                 artists.append(triangle)
@@ -442,14 +582,21 @@ def visualize_flocking_simulation(space_data, steps=1000, arrival_rate=0.05,
         else:
             range_circle.set_visible(False)
         
-        # Update status text
+        # Get overcrowding metrics
+        overcrowding_metrics = sim.calculate_overcrowding_metrics()
+        
+        # Update status text with overcrowding information
         status_text.set_text(
             f'STEP: {frame * steps_per_frame}\nAGENTS: {len(sim.agents)}\n'
             f'COHESION: {sim.cohesion_factor:.1f}\n'
             f'SEPARATION: {sim.separation_factor:.1f}\n'
             f'ALIGNMENT: {sim.alignment_factor:.1f}\n'
             f'VISUAL RANGE: {sim.visual_range}\n'
-            f'ARRIVAL: {sim.arrival_rate:.2f}'
+            f'ARRIVAL: {sim.arrival_rate:.2f}\n'
+            f'OVERCROWDED: {overcrowding_metrics["overcrowded_count"]}\n'
+            f'OVERCROWD %: {overcrowding_metrics["overcrowding_percentage"]:.1f}%\n'
+            f'AVG NEIGHBORS: {overcrowding_metrics["average_neighbors"]:.1f}\n'
+            f'MAX NEIGHBORS: {overcrowding_metrics["max_neighbors"]}'
         )
         
         # Return all artists that need to be redrawn
@@ -559,7 +706,8 @@ def visualize_flocking_simulation(space_data, steps=1000, arrival_rate=0.05,
 def generate_flocking_heatmap(space_data, steps=1000, arrival_rate=0.05, 
                              cohesion_factor=0.5, 
                              separation_factor=0.5, alignment_factor=0.5,
-                             perception_radius=10, max_force=1.0, death_rate=0.001):
+                             perception_radius=10, max_force=1.0,
+                             overcrowding_threshold=10):
     """Generate a heatmap of dog density for the flocking simulation using blueprint layout."""
     sim = FlockingDogParkSimulation(
         space_data=space_data,
@@ -567,7 +715,7 @@ def generate_flocking_heatmap(space_data, steps=1000, arrival_rate=0.05,
         separation_factor=separation_factor,
         alignment_factor=alignment_factor,
         visual_range=perception_radius,
-        death_rate=death_rate
+        overcrowding_threshold=overcrowding_threshold
     )
     # --- Add: Load grey_obstacle_mask if present ---
     if 'grey_obstacle_mask' in space_data:
@@ -740,7 +888,263 @@ def generate_flocking_heatmap(space_data, steps=1000, arrival_rate=0.05,
     plt.show()
     # --- End Additional Plots ---
     
+    # Print overcrowding statistics
+    final_stats = sim.get_overcrowding_statistics()
+    if final_stats:
+        print("\n" + "=" * 60)
+        print("📊 OVERCROWDING ANALYSIS SUMMARY")
+        print("=" * 60)
+        print(f"Simulation Steps: {final_stats['simulation_steps']}")
+        print(f"Average Overcrowding: {final_stats['average_overcrowding_percentage']:.1f}%")
+        print(f"Peak Overcrowding: {final_stats['peak_overcrowding_percentage']:.1f}%")
+        print(f"Average Neighbors: {final_stats['average_neighbors_over_time']:.1f}")
+        print(f"Maximum Neighbors: {final_stats['maximum_neighbors_ever']}")
+        
+        if final_stats['final_metrics']:
+            final = final_stats['final_metrics']
+            print(f"\nFinal State:")
+            print(f"  Total Agents: {final['total_agents']}")
+            print(f"  Overcrowded Agents: {final['overcrowded_count']}")
+            print(f"  Sustained Overcrowding: {final['agents_with_sustained_overcrowding']}")
+    
     return density_grid
+
+
+def analyze_park_capacity(space_data, min_agents=20, max_agents=300, step_size=20, 
+                         simulation_steps=500, cohesion_factor=0.5, 
+                         separation_factor=0.5, alignment_factor=0.5,
+                         perception_radius=20, max_force=1.0,
+                         overcrowding_threshold=10, overcrowding_limit=20):
+    """
+    Analyze park capacity by running simulations with different agent counts.
+    
+    Args:
+        space_data: Preprocessed space data
+        min_agents: Minimum number of agents to test
+        max_agents: Maximum number of agents to test
+        step_size: Increment between agent counts
+        simulation_steps: Number of steps per simulation
+        overcrowding_limit: Percentage of overcrowded agents that indicates overcrowding
+    
+    Returns:
+        Dictionary with capacity analysis results
+    """
+    
+    print("🐕 Starting Dog Park Capacity Analysis...")
+    print(f"Testing agent counts from {min_agents} to {max_agents} (step: {step_size})")
+    print(f"Overcrowding threshold: {overcrowding_threshold} neighbors")
+    print(f"Overcrowding limit: {overcrowding_limit}% of agents")
+    print("=" * 60)
+    
+    agent_counts = range(min_agents, max_agents + 1, step_size)
+    results = []
+    
+    for agent_count in agent_counts:
+        print(f"\n🔄 Testing {agent_count} agents...")
+        
+        # Create simulation with fixed number of agents (no arrivals)
+        sim = FlockingDogParkSimulation(
+            space_data=space_data,
+            cohesion_factor=cohesion_factor,
+            separation_factor=separation_factor,
+            alignment_factor=alignment_factor,
+            visual_range=perception_radius,
+            overcrowding_threshold=overcrowding_threshold
+        )
+        sim.arrival_rate = 0.0  # No new arrivals during analysis
+        sim.max_force = max_force
+        
+        # Add the target number of agents
+        sim.add_random_agents(agent_count)
+        
+        # Run simulation for stabilization
+        stabilization_steps = min(200, simulation_steps // 2)
+        for _ in range(stabilization_steps):
+            sim.step()
+        
+        # Collect metrics during analysis period
+        analysis_metrics = []
+        for step in range(simulation_steps - stabilization_steps):
+            sim.step()
+            metrics = sim.calculate_overcrowding_metrics()
+            analysis_metrics.append(metrics)
+        
+        # Calculate summary statistics
+        if analysis_metrics:
+            avg_overcrowding_pct = np.mean([m['overcrowding_percentage'] for m in analysis_metrics])
+            max_overcrowding_pct = max([m['overcrowding_percentage'] for m in analysis_metrics])
+            avg_neighbors = np.mean([m['average_neighbors'] for m in analysis_metrics])
+            max_neighbors = max([m['max_neighbors'] for m in analysis_metrics])
+            avg_sustained_overcrowding = np.mean([m['agents_with_sustained_overcrowding'] for m in analysis_metrics])
+        else:
+            avg_overcrowding_pct = 0
+            max_overcrowding_pct = 0
+            avg_neighbors = 0
+            max_neighbors = 0
+            avg_sustained_overcrowding = 0
+        
+        result = {
+            'agent_count': agent_count,
+            'avg_overcrowding_percentage': avg_overcrowding_pct,
+            'peak_overcrowding_percentage': max_overcrowding_pct,
+            'avg_neighbors': avg_neighbors,
+            'max_neighbors': max_neighbors,
+            'avg_sustained_overcrowding': avg_sustained_overcrowding,
+            'is_overcrowded': avg_overcrowding_pct > overcrowding_limit,
+            'actual_agent_count': len(sim.agents)  # Final count after simulation
+        }
+        
+        results.append(result)
+        
+        # Print progress
+        status = "❌ OVERCROWDED" if result['is_overcrowded'] else "✅ OK"
+        print(f"   Avg Overcrowding: {avg_overcrowding_pct:.1f}% | "
+              f"Peak: {max_overcrowding_pct:.1f}% | "
+              f"Avg Neighbors: {avg_neighbors:.1f} | "
+              f"Status: {status}")
+    
+    # Find optimal capacity (largest agent count before overcrowding)
+    optimal_capacity = None
+    for result in results:
+        if not result['is_overcrowded']:
+            optimal_capacity = result['agent_count']
+        else:
+            break
+    
+    # Generate summary
+    print("\n" + "=" * 60)
+    print("📊 CAPACITY ANALYSIS SUMMARY")
+    print("=" * 60)
+    
+    if optimal_capacity:
+        print(f"🎯 RECOMMENDED CAPACITY: {optimal_capacity} agents")
+        print(f"   (Before {overcrowding_limit}% overcrowding threshold)")
+    else:
+        print(f"⚠️  All tested capacities exceeded {overcrowding_limit}% overcrowding!")
+        print(f"   Consider increasing space or lowering agent density.")
+    
+    # Find the point where overcrowding starts
+    first_overcrowded = next((r for r in results if r['is_overcrowded']), None)
+    if first_overcrowded:
+        print(f"📈 OVERCROWDING BEGINS: ~{first_overcrowded['agent_count']} agents")
+        print(f"   ({first_overcrowded['avg_overcrowding_percentage']:.1f}% avg overcrowding)")
+    
+    return {
+        'results': results,
+        'optimal_capacity': optimal_capacity,
+        'overcrowding_threshold_neighbors': overcrowding_threshold,
+        'overcrowding_limit_percentage': overcrowding_limit,
+        'parameters': {
+            'cohesion': cohesion_factor,
+            'separation': separation_factor,
+            'alignment': alignment_factor,
+            'perception_radius': perception_radius
+        }
+    }
+
+
+def plot_capacity_analysis(capacity_results, save_figure=True):
+    """
+    Plot the results of capacity analysis.
+    
+    Args:
+        capacity_results: Results from analyze_park_capacity()
+        save_figure: Whether to save the plot to figures directory
+    """
+    results = capacity_results['results']
+    optimal_capacity = capacity_results['optimal_capacity']
+    
+    if not results:
+        print("No results to plot!")
+        return
+    
+    agent_counts = [r['agent_count'] for r in results]
+    avg_overcrowding = [r['avg_overcrowding_percentage'] for r in results]
+    peak_overcrowding = [r['peak_overcrowding_percentage'] for r in results]
+    avg_neighbors = [r['avg_neighbors'] for r in results]
+    max_neighbors = [r['max_neighbors'] for r in results]
+    
+    # Create subplot figure
+    plt.style.use('dark_background')
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+    fig.patch.set_facecolor('#2A2A2A')
+    
+    # Plot 1: Overcrowding Percentage
+    ax1.plot(agent_counts, avg_overcrowding, 'o-', color='#FF6B6B', linewidth=2, label='Average')
+    ax1.plot(agent_counts, peak_overcrowding, 's--', color='#FF4757', linewidth=2, label='Peak')
+    ax1.axhline(y=capacity_results['overcrowding_limit_percentage'], color='red', 
+                linestyle=':', alpha=0.7, label=f"{capacity_results['overcrowding_limit_percentage']}% Limit")
+    if optimal_capacity:
+        ax1.axvline(x=optimal_capacity, color='lime', linestyle='--', alpha=0.8, 
+                   label=f'Optimal: {optimal_capacity}')
+    ax1.set_xlabel('Number of Agents')
+    ax1.set_ylabel('Overcrowding Percentage (%)')
+    ax1.set_title('Overcrowding vs Agent Count')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.set_facecolor('#2A2A2A')
+    
+    # Plot 2: Average Neighbors
+    ax2.plot(agent_counts, avg_neighbors, 'o-', color='#4ECDC4', linewidth=2, label='Average')
+    ax2.plot(agent_counts, max_neighbors, 's--', color='#26D0CE', linewidth=2, label='Maximum')
+    ax2.axhline(y=capacity_results['overcrowding_threshold_neighbors'], color='orange', 
+                linestyle=':', alpha=0.7, label=f"Threshold: {capacity_results['overcrowding_threshold_neighbors']}")
+    if optimal_capacity:
+        ax2.axvline(x=optimal_capacity, color='lime', linestyle='--', alpha=0.8)
+    ax2.set_xlabel('Number of Agents')
+    ax2.set_ylabel('Neighbors per Agent')
+    ax2.set_title('Neighbor Count vs Agent Count')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    ax2.set_facecolor('#2A2A2A')
+    
+    # Plot 3: System Status
+    status_colors = ['green' if not r['is_overcrowded'] else 'red' for r in results]
+    ax3.scatter(agent_counts, avg_overcrowding, c=status_colors, s=100, alpha=0.7)
+    ax3.axhline(y=capacity_results['overcrowding_limit_percentage'], color='red', 
+                linestyle=':', alpha=0.7)
+    if optimal_capacity:
+        ax3.axvline(x=optimal_capacity, color='lime', linestyle='--', alpha=0.8)
+    ax3.set_xlabel('Number of Agents')
+    ax3.set_ylabel('Avg Overcrowding (%)')
+    ax3.set_title('System Status (Green=OK, Red=Overcrowded)')
+    ax3.grid(True, alpha=0.3)
+    ax3.set_facecolor('#2A2A2A')
+    
+    # Plot 4: Capacity Summary
+    ax4.axis('off')
+    summary_text = f"""
+CAPACITY ANALYSIS SUMMARY
+
+Overcrowding Threshold: {capacity_results['overcrowding_threshold_neighbors']} neighbors
+Overcrowding Limit: {capacity_results['overcrowding_limit_percentage']}% of agents
+
+Recommended Capacity: {optimal_capacity if optimal_capacity else 'Not found'} agents
+
+Parameters:
+• Cohesion: {capacity_results['parameters']['cohesion']:.1f}
+• Separation: {capacity_results['parameters']['separation']:.1f}
+• Alignment: {capacity_results['parameters']['alignment']:.1f}
+• Perception: {capacity_results['parameters']['perception_radius']}
+
+Total Tests: {len(results)}
+Agent Range: {min(agent_counts)} - {max(agent_counts)}
+"""
+    ax4.text(0.1, 0.9, summary_text, transform=ax4.transAxes, fontfamily='monospace',
+             fontsize=11, color='white', verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='#2A2A2A', alpha=0.8, edgecolor='white'))
+    
+    plt.tight_layout()
+    
+    if save_figure:
+        os.makedirs('figures', exist_ok=True)
+        plt.savefig(os.path.join('figures', 'capacity_analysis.png'), dpi=150, 
+                   facecolor='#2A2A2A', edgecolor='none')
+        print(f"\n💾 Capacity analysis plot saved to figures/capacity_analysis.png")
+    
+    plt.show()
+    
+    return fig
 
 
 if __name__ == "__main__":
@@ -753,12 +1157,36 @@ if __name__ == "__main__":
     parser.add_argument('--perception', type=int, default=20, help='Perception radius')
     parser.add_argument('--max_force', type=float, default=1.0, help='Maximum steering force')
     parser.add_argument('--steps', type=int, default=2000, help='Number of simulation steps')
-    parser.add_argument('--death_rate', type=float, default=0.001, help='Probability of agent death per step (0-1)')
+    parser.add_argument('--overcrowding_threshold', type=int, default=10, help='Number of neighbors before agent is considered overcrowded')
     parser.add_argument('--heatmap', action='store_true', help='Generate heatmap instead of animation')
+    parser.add_argument('--capacity_analysis', action='store_true', help='Run capacity analysis to determine optimal agent count')
+    parser.add_argument('--min_agents', type=int, default=20, help='Minimum agents for capacity analysis')
+    parser.add_argument('--max_agents', type=int, default=300, help='Maximum agents for capacity analysis')
+    parser.add_argument('--agent_step', type=int, default=20, help='Agent count increment for capacity analysis')
+    parser.add_argument('--overcrowding_limit', type=float, default=20.0, help='Overcrowding percentage limit for capacity analysis')
     
     args = parser.parse_args()
     space_data = load_preprocessed_space(args.layout)
-    if args.heatmap:
+    
+    if args.capacity_analysis:
+        # Run capacity analysis
+        results = analyze_park_capacity(
+            space_data=space_data,
+            min_agents=args.min_agents,
+            max_agents=args.max_agents,
+            step_size=args.agent_step,
+            simulation_steps=args.steps,
+            cohesion_factor=args.cohesion,
+            separation_factor=args.separation,
+            alignment_factor=args.alignment,
+            perception_radius=args.perception,
+            max_force=args.max_force,
+            overcrowding_threshold=args.overcrowding_threshold,
+            overcrowding_limit=args.overcrowding_limit
+        )
+        # Plot the results
+        plot_capacity_analysis(results)
+    elif args.heatmap:
         generate_flocking_heatmap(
             space_data=space_data,
             arrival_rate=args.arrival_rate,
@@ -768,7 +1196,7 @@ if __name__ == "__main__":
             alignment_factor=args.alignment,
             perception_radius=args.perception,
             max_force=args.max_force,
-            death_rate=args.death_rate
+            overcrowding_threshold=args.overcrowding_threshold
         )
     else:
         visualize_flocking_simulation(
@@ -780,5 +1208,5 @@ if __name__ == "__main__":
             alignment_factor=args.alignment,
             perception_radius=args.perception,
             max_force=args.max_force,
-            death_rate=args.death_rate
+            overcrowding_threshold=args.overcrowding_threshold
         ) 
